@@ -14,28 +14,30 @@ triangular structure of the moment conditions:
             decoupled from all other parameters.  Standard MLE solves them
             optimally and there is no benefit to folding them into a larger system.
 
-  Step 2 - With alpha fixed at alpha-hat, solve for (phi, gamma0, gamma1) via
-            M5-M7, concentrating out (beta0, beta1) analytically via OLS (M3-M4).
+  Step 2 - With alpha fixed at alpha-hat, minimise the L2-penalised GMM
+            objective for (phi, gamma0, gamma1):
 
-            The key structural observation is that M3 and M4 are the OLS normal
-            equations for regressing (Y - phi/(1 - e_b)) on (1, log(X)) among
-            controls.  Given any trial (phi, gamma0, gamma1), they therefore
-            determine (beta0, beta1) in closed form via OLS -- no solver needed.
+              Q_pen(φ,γ) = M5² + M6² + M7²
+                         + λ·[(φ−φ₀)² + (γ₀−γ₀⁰)² + (γ₁−γ₁⁰)²]
 
-            Substituting this concentrated solution back reduces the problem to
-            finding (phi, gamma0, gamma1) that satisfy M5-M7:
-              M5 = E[(1-D) * odds_a * R] = 0
-              M6 = E[(1-D) * (odds_b - odds_a) * R] = 0
-              M7 = E[(1-D) * X * (odds_b - odds_a) * R] = 0
-            where R = Y - m0,  m0 = beta0(phi,g) + beta1(phi,g)*log(X) + phi/(1-e_b).
+            where (φ₀, γ₀⁰, γ₁⁰) are the MLE starting values (probit MLE
+            for γ, 0 for φ) and β is concentrated out analytically (OLS).
 
-            This concentrated 3x3 system is smaller, better-conditioned, and
-            faster to solve than the original 5x5 or 7x7 system.
+            Viewing the unpenalised M5=M6=M7=0 system as an exactly-identified
+            GMM with identity weight matrix, the unpenalised objective is
+            M5²+M6²+M7².  Adding the ridge term keeps parameters close to
+            their MLE anchors, preventing the solver from drifting into
+            degenerate regions (e.g. φ→−∞ causing the OLS augmentation to
+            absorb all variance).
+
+            At fixed λ the estimator is slightly biased (O(λ)); for asymptotic
+            consistency λ should shrink to 0 as n→∞.  The default λ=0.01 is
+            a proof-of-concept value suited for n=2000.
 """
 
 import numpy as np
 from scipy.stats import norm
-from scipy.optimize import root, least_squares
+from scipy.optimize import least_squares
 from statsmodels.discrete.discrete_model import Logit, Probit
 import statsmodels.api as sm
 
@@ -60,7 +62,7 @@ def _clip_ps(p, eps=1e-6):
 # Core estimator
 # ---------------------------------------------------------------------------
 
-def triply_robust_att(Y, D, X, alpha_oracle=None):
+def triply_robust_att(Y, D, X, alpha_oracle=None, l2_penalty=0.01):
     """
     Triply robust estimator for the Average Treatment Effect on the Treated.
 
@@ -81,6 +83,15 @@ def triply_robust_att(Y, D, X, alpha_oracle=None):
         If provided, Step 1 is skipped and (alpha0, alpha1) are fixed to
         these values.  Useful for diagnostic comparisons (e.g. section 4.2
         oracle experiment).
+    l2_penalty : float, optional (default 0.01)
+        Ridge penalty coefficient λ.  The solver minimises:
+
+            Q_pen(φ,γ) = M5² + M6² + M7²
+                       + λ·[(φ-φ₀)² + (γ₀-γ₀⁰)² + (γ₁-γ₁⁰)²]
+
+        where (φ₀, γ₀⁰, γ₁⁰) are the MLE starting values (probit MLE for
+        γ, 0 for φ).  At fixed λ the estimator has an O(λ) bias; for
+        asymptotic consistency λ should shrink to 0 as n grows.
 
     Returns
     -------
@@ -91,7 +102,8 @@ def triply_robust_att(Y, D, X, alpha_oracle=None):
         alpha        : (alpha0, alpha1) -- augmentation PS (logit) parameters
         gamma        : (gamma0, gamma1) -- balance PS (probit) parameters
         m0_hat       : array, shape (n,) -- fitted imputation values
-        converged    : bool -- True if M5-M7 solver norm < 1e-4
+        converged    : bool -- True when the LM solver reached its stopping
+                              criterion (gradient/step norm small)
         oracle_alpha : bool -- True when alpha was supplied via alpha_oracle
     """
     Y = np.asarray(Y, dtype=float)
@@ -178,66 +190,29 @@ def triply_robust_att(Y, D, X, alpha_oracle=None):
     phi_init = 0.0
     pgg0 = np.array([phi_init, gamma0_init, gamma1_init])
 
-    _CONV_TOL = 1e-4
+    # ------------------------------------------------------------------
+    # Penalised residual vector (6-element, overdetermined 6×3 system)
+    # ------------------------------------------------------------------
+    # Minimising ½·‖r(pgg)‖² is equivalent to:
+    #   Q_pen = M5² + M6² + M7² + λ·[(φ−φ₀)² + (γ₀−γ₀⁰)² + (γ₁−γ₁⁰)²]
+    # The three penalty rows act as a soft ridge prior anchored at the MLE
+    # starting values, preventing the solver from reaching degenerate
+    # regions where large |φ| lets the OLS soak up all variance.
+    # ------------------------------------------------------------------
+    sq_lam = np.sqrt(l2_penalty)
 
-    best_pgg  = None
-    best_norm = np.inf
+    def penalized_residuals(pgg):
+        moments = moment_conditions_concentrated(pgg)
+        return np.concatenate([moments, sq_lam * (pgg - pgg0)])
 
-    # --- Pass 1: Powell hybrid ---
-    try:
-        sol = root(moment_conditions_concentrated, pgg0, method='hybr',
-                   options={'maxfev': 5_000, 'xtol': 1e-8})
-        cand_norm = np.linalg.norm(moment_conditions_concentrated(sol.x))
-        if cand_norm < best_norm:
-            best_norm = cand_norm
-            best_pgg  = sol.x.copy()
-    except Exception:
-        pass
+    sol = least_squares(penalized_residuals, pgg0,
+                        method='lm', max_nfev=10_000,
+                        ftol=1e-10, xtol=1e-10)
 
-    # --- Pass 2: Levenberg-Marquardt root-finder ---
-    if best_pgg is None or best_norm >= _CONV_TOL:
-        try:
-            sol2 = root(moment_conditions_concentrated, pgg0, method='lm',
-                        options={'maxiter': 5_000, 'col_deriv': 0})
-            cand_norm = np.linalg.norm(moment_conditions_concentrated(sol2.x))
-            if cand_norm < best_norm:
-                best_norm = cand_norm
-                best_pgg  = sol2.x.copy()
-        except Exception:
-            pass
-
-    # --- Pass 3: Levenberg-Marquardt least-squares minimiser ---
-    if best_pgg is None or best_norm >= _CONV_TOL:
-        try:
-            ls_sol = least_squares(moment_conditions_concentrated, pgg0,
-                                   method='lm', max_nfev=10_000,
-                                   ftol=1e-8, xtol=1e-8)
-            cand_norm = np.linalg.norm(ls_sol.fun)
-            if cand_norm < best_norm:
-                best_norm = cand_norm
-                best_pgg  = ls_sol.x.copy()
-        except Exception:
-            pass
-
-    # --- Pass 4: Perturbed starting values (tiebreaker for stuck solvers) ---
-    if best_pgg is None or best_norm >= _CONV_TOL:
-        rng_perturb = np.random.default_rng(0)
-        for _ in range(5):
-            pgg_pert = pgg0 + rng_perturb.normal(0, 0.5, size=3)
-            try:
-                sol_p = root(moment_conditions_concentrated, pgg_pert,
-                             method='hybr', options={'maxfev': 3_000, 'xtol': 1e-8})
-                cand_norm = np.linalg.norm(moment_conditions_concentrated(sol_p.x))
-                if cand_norm < best_norm:
-                    best_norm = cand_norm
-                    best_pgg  = sol_p.x.copy()
-                    if best_norm < _CONV_TOL:
-                        break
-            except Exception:
-                continue
-
-    pgg_hat   = best_pgg if best_pgg is not None else pgg0
-    converged = bool(best_norm < _CONV_TOL)
+    pgg_hat   = sol.x
+    # "converged" = the LM solver reached its own stopping criterion
+    # (gradient norm small, or step size small).  LM status > 0 signals this.
+    converged = bool(sol.status > 0)
 
     # ------------------------------------------------------------------
     # Step 3: Recover beta from concentrated-out OLS and compute the ATT
