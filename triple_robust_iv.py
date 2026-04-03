@@ -167,6 +167,8 @@ def triply_robust_iv(Y, D, X,
         eb_feature = X
     elif eb_basis == 'sin':
         eb_feature = np.sin(X)
+    elif eb_basis == 'expX':
+        eb_feature = np.exp(X)
     else:
         raise ValueError(f"Unknown eb_basis: {eb_basis}")
 
@@ -187,6 +189,9 @@ def triply_robust_iv(Y, D, X,
     elif or_columns == 'logX_X':
         exog_ctrl = np.column_stack([np.ones(ctrl.sum()), logX[ctrl], X[ctrl]])
         exog_all = np.column_stack([np.ones(n), logX, X])
+    elif or_columns == 'X':
+        exog_ctrl = np.column_stack([np.ones(ctrl.sum()), X[ctrl]])
+        exog_all = np.column_stack([np.ones(n), X])
     else:
         raise ValueError(f"Unknown or_columns: {or_columns}")
 
@@ -233,4 +238,149 @@ def triply_robust_iv(Y, D, X,
         'gamma': gamma,
         'first_F': first_F,
         'eb_converged': eb_converged,
+        'm0_hat': m0_hat,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Full estimator (Estimator F): includes the M6 moment explicitly
+# ---------------------------------------------------------------------------
+
+def triply_robust_iv_full(Y, D, X,
+                          ea_basis='sin',
+                          eb_basis='X',
+                          or_columns='logX'):
+    """
+    Full triply robust ATT estimator with explicit M6 moment.
+
+    Same as triply_robust_iv (Estimator S), but the imputation regression
+    uses FOUR instruments [exog, Z, (odds_b - odds_a)] instead of three
+    [exog, Z], making it an over-identified GMM/IV system that explicitly
+    activates the e_b-channel moment M6.
+
+    The key difference from S is that the instrument set includes the
+    "telescoping" instrument (odds_b - odds_a) from the balance PS.
+
+    Parameters / Returns: same as triply_robust_iv.
+    """
+    Y = np.asarray(Y, dtype=float)
+    D = np.asarray(D, dtype=float)
+    X = np.asarray(X, dtype=float)
+    n = len(Y)
+
+    logX = np.log(np.maximum(np.abs(X) + 1e-300, 1e-300))
+    ctrl = (D == 0)
+    treated = (D == 1)
+    n1 = treated.sum()
+
+    # Step 1: Fit logit PS (e_a) by MLE
+    if ea_basis == 'sin':
+        ea_feature = np.sin(X)
+    elif ea_basis == 'X2':
+        ea_feature = X ** 2
+    elif ea_basis == 'X':
+        ea_feature = X
+    else:
+        raise ValueError(f"Unknown ea_basis: {ea_basis}")
+
+    try:
+        Xa = sm.add_constant(ea_feature)
+        logit_mod = Logit(D, Xa).fit(disp=False, maxiter=200)
+        alpha = logit_mod.params.copy()
+    except Exception:
+        alpha = np.array([0.0, 0.0])
+
+    ea_hat = _clip_ps(_invlogit(alpha[0] + alpha[1] * ea_feature))
+    Z = ea_hat / (1.0 - ea_hat)  # instrument: fitted odds of e_a
+
+    # Step 2: Fit log-logistic PS (e_b) by MLE
+    if eb_basis == 'X':
+        eb_feature = X
+    elif eb_basis == 'sin':
+        eb_feature = np.sin(X)
+    elif eb_basis == 'expX':
+        eb_feature = np.exp(X)
+    else:
+        raise ValueError(f"Unknown eb_basis: {eb_basis}")
+
+    gamma, eb_converged = _log_logistic_mle(D, eb_feature)
+
+    odds_b = gamma[0] + gamma[1] * eb_feature
+    odds_b = np.maximum(odds_b, MIN_ODDS)
+    eb_hat = _clip_ps(odds_b / (1.0 + odds_b))
+    W = 1.0 / (1.0 - eb_hat)
+
+    # Step 3: Over-identified IV/GMM among controls
+    # Instruments: {exog columns, Z, (odds_b - odds_a)}  → k_iv columns
+    # Regressors:  {exog columns, W}                     → k_reg columns
+    if or_columns == 'logX':
+        exog_ctrl = np.column_stack([np.ones(ctrl.sum()), logX[ctrl]])
+        exog_all = np.column_stack([np.ones(n), logX])
+    elif or_columns == 'logX_X':
+        exog_ctrl = np.column_stack([np.ones(ctrl.sum()), logX[ctrl], X[ctrl]])
+        exog_all = np.column_stack([np.ones(n), logX, X])
+    elif or_columns == 'X':
+        exog_ctrl = np.column_stack([np.ones(ctrl.sum()), X[ctrl]])
+        exog_all = np.column_stack([np.ones(n), X])
+    else:
+        raise ValueError(f"Unknown or_columns: {or_columns}")
+
+    W_ctrl = W[ctrl]
+    Z_ctrl = Z[ctrl]
+    Y_ctrl = Y[ctrl]
+
+    odds_a_ctrl = Z[ctrl]  # odds of e_a among controls
+    odds_b_ctrl = odds_b[ctrl]
+    telescope_ctrl = odds_b_ctrl - odds_a_ctrl  # the M6 instrument
+
+    # Instrument matrix: [exog, Z, telescope]
+    iv_ctrl = np.column_stack([exog_ctrl, Z_ctrl, telescope_ctrl])
+    # Regressor matrix: [exog, W]
+    reg_ctrl = np.column_stack([exog_ctrl, W_ctrl])
+
+    # 2SLS-style GMM: θ = (R'P_Z R)^{-1} R'P_Z Y where P_Z = Z(Z'Z)^{-1}Z'
+    ZtZ = iv_ctrl.T @ iv_ctrl
+    try:
+        ZtZ_inv = np.linalg.inv(ZtZ)
+    except np.linalg.LinAlgError:
+        ZtZ_inv = np.linalg.pinv(ZtZ)
+
+    P_Z = iv_ctrl @ ZtZ_inv @ iv_ctrl.T  # projection matrix
+    RtPR = reg_ctrl.T @ P_Z @ reg_ctrl
+    RtPY = reg_ctrl.T @ P_Z @ Y_ctrl
+
+    try:
+        theta = np.linalg.solve(RtPR, RtPY)
+    except np.linalg.LinAlgError:
+        theta, _, _, _ = np.linalg.lstsq(RtPR, RtPY, rcond=None)
+
+    n_exog = exog_ctrl.shape[1]
+    beta = theta[:n_exog]
+    phi = theta[n_exog]
+
+    # First-stage F-statistic (same as S: Z as excluded instrument)
+    n_ctrl = ctrl.sum()
+    fs_X = np.column_stack([exog_ctrl, Z_ctrl])
+    k_fs = fs_X.shape[1]
+    fs_coef, _, _, _ = np.linalg.lstsq(fs_X, W_ctrl, rcond=None)
+    W_hat_fs = fs_X @ fs_coef
+    fs_coef_r, _, _, _ = np.linalg.lstsq(exog_ctrl, W_ctrl, rcond=None)
+    W_hat_r = exog_ctrl @ fs_coef_r
+    ssr_r = np.sum((W_ctrl - W_hat_r) ** 2)
+    ssr_u = np.sum((W_ctrl - W_hat_fs) ** 2)
+    first_F = max(0.0, ((ssr_r - ssr_u) / 1.0) / (ssr_u / max(n_ctrl - k_fs, 1)))
+
+    # Step 4: Impute m0 for ALL units, compute ATT
+    m0_hat = exog_all @ beta + phi * W
+    tau_att = float(np.mean((Y - m0_hat)[treated]))
+
+    return {
+        'tau_att': tau_att,
+        'beta': beta,
+        'phi': phi,
+        'alpha': alpha,
+        'gamma': gamma,
+        'first_F': first_F,
+        'eb_converged': eb_converged,
+        'm0_hat': m0_hat,
     }
