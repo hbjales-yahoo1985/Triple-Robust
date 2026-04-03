@@ -25,6 +25,9 @@ from scipy.optimize import minimize
 from statsmodels.discrete.discrete_model import Logit
 import statsmodels.api as sm
 
+# Minimum threshold for odds to ensure valid probabilities
+MIN_ODDS = 1e-10
+
 
 # ---------------------------------------------------------------------------
 # Helpers (reused from triple_robust.py)
@@ -76,10 +79,10 @@ def _log_logistic_mle(D, basis, gamma_init=None):
         g0, g1 = gamma
         odds = g0 + g1 * basis
         # Barrier: odds must be > 0 for valid probabilities
-        if np.any(odds <= 1e-10):
+        if np.any(odds <= MIN_ODDS):
             return 1e12
         eb = odds / (1.0 + odds)
-        eb = np.clip(eb, 1e-10, 1.0 - 1e-10)
+        eb = np.clip(eb, MIN_ODDS, 1.0 - MIN_ODDS)
         ll = np.sum(D * np.log(eb) + (1.0 - D) * np.log(1.0 - eb))
         return -ll
 
@@ -170,7 +173,7 @@ def triply_robust_iv(Y, D, X,
     gamma, eb_converged = _log_logistic_mle(D, eb_feature)
 
     odds_b = gamma[0] + gamma[1] * eb_feature
-    odds_b = np.maximum(odds_b, 1e-10)  # safety floor
+    odds_b = np.maximum(odds_b, MIN_ODDS)  # safety floor
     eb_hat = _clip_ps(odds_b / (1.0 + odds_b))
     W = 1.0 / (1.0 - eb_hat)  # = 1 + odds_b
 

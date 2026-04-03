@@ -18,6 +18,12 @@ import matplotlib.pyplot as plt
 
 from triple_robust_iv import _invlogit, _clip_ps, triply_robust_iv
 
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+SANITY_CHECK_SAMPLE_SIZE = 500_000
+SANITY_CHECK_SEED = 999
+
 
 # ---------------------------------------------------------------------------
 # DGP definitions
@@ -96,16 +102,16 @@ def run_simulation(R=10, n=5000, seed=42):
     print("=" * 100)
 
     # Verify true ATT with large sample
-    rng_check = np.random.default_rng(999)
-    Y_c, D_c, X_c = dgp1(rng_check, 500_000)
+    rng_check = np.random.default_rng(SANITY_CHECK_SEED)
+    Y_c, D_c, X_c = dgp1(rng_check, SANITY_CHECK_SAMPLE_SIZE)
     empirical_att = float(np.mean(Y_c[D_c == 1]) - np.mean(
         (2.0 + 0.5 * np.log(X_c) + 0.3 * X_c)[D_c == 1]))
-    print(f"Sanity check — DGP 1 empirical ATT (n=500k): {empirical_att:.4f}")
+    print(f"Sanity check — DGP 1 empirical ATT (n={SANITY_CHECK_SAMPLE_SIZE}): {empirical_att:.4f}")
 
-    Y_c2, D_c2, X_c2 = dgp2(rng_check, 500_000)
+    Y_c2, D_c2, X_c2 = dgp2(rng_check, SANITY_CHECK_SAMPLE_SIZE)
     empirical_att2 = float(np.mean(Y_c2[D_c2 == 1]) - np.mean(
         (2.0 + 0.5 * np.log(X_c2) + 0.3 * X_c2)[D_c2 == 1]))
-    print(f"Sanity check — DGP 2 empirical ATT (n=500k): {empirical_att2:.4f}")
+    print(f"Sanity check — DGP 2 empirical ATT (n={SANITY_CHECK_SAMPLE_SIZE}): {empirical_att2:.4f}")
     print()
 
     header = (f"{'Case':>4}  {'DGP':>4}  {'r':>3}  {'ea':>3}  {'eb':>3}  "
