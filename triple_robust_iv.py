@@ -387,26 +387,30 @@ def triply_robust_iv_full(Y, D, X,
 
 
 # ---------------------------------------------------------------------------
-# Estimator G: Centered exactly-identified estimator with M6
+# Estimator G: Exactly-identified estimator replacing M3 with M6
 # ---------------------------------------------------------------------------
 
 def triply_robust_iv_centered(Y, D, X,
                                ea_basis='X',
                                eb_basis='expX',
                                or_columns='X',
-                               max_iter=100,
-                               tol=1e-8):
+                               **kwargs):
     """
-    Centered exactly-identified triply robust ATT estimator (Estimator G).
+    Exactly-identified triply robust ATT estimator (Estimator G).
 
-    Key differences from S and F:
-    1. Uses log-logistic MLE for e_b, but only fixes gamma_1 from MLE;
-       gamma_0 is left free and pinned by M6.
-    2. Centers Y and q(X) around control-group means, drops the intercept.
-    3. Uses exactly-identified IV: instruments {q_tilde, Z} for
-       regressors {q_tilde, W}, enforcing M4 and M5.
-    4. Solves for gamma_0 via a closed-form update from M6, iterating
-       with the IV residuals.
+    Uses a 3x3 just-identified IV system that replaces the constant-
+    instrument moment M3 with the telescoping moment M6:
+
+      M4: E[(1-D) q(X) R] = 0         (OR instrument)
+      M5: E[(1-D) Z R] = 0            (e_a instrument)
+      M6: E[(1-D) (ob - Z) R] = 0     (e_b telescope instrument)
+
+    where R = Y - beta_0 - beta_1 q(X) - phi W, Z = e_a/(1-e_a),
+    ob = gamma_0 + gamma_1 f(X), W = 1 + ob.
+
+    This is like the full estimator F, but exactly identified (3 instruments
+    for 3 regressors) rather than overidentified (4 instruments for 3).
+    Both gamma_0 and gamma_1 are taken from the log-logistic MLE.
 
     Parameters
     ----------
@@ -414,20 +418,17 @@ def triply_robust_iv_centered(Y, D, X,
     ea_basis : str -- basis for logit PS ('X', 'sin', 'X2')
     eb_basis : str -- basis for log-logistic PS ('expX', 'X', 'sin')
     or_columns : str -- OR columns ('X', 'logX', 'logX_X')
-    max_iter : int -- max iterations for gamma_0 update
-    tol : float -- convergence tolerance for gamma_0
 
     Returns
     -------
-    dict with keys: tau_att, beta1, phi, alpha, gamma, gamma0_mle,
-                    gamma0_final, first_F, eb_converged, m0_hat,
-                    converged, iterations, gamma0_path, denom_path
+    dict with tau_att, beta, phi, alpha, gamma, first_F, eb_converged, m0_hat
     """
     Y = np.asarray(Y, dtype=float)
     D = np.asarray(D, dtype=float)
     X = np.asarray(X, dtype=float)
     n = len(Y)
 
+    logX = np.log(np.maximum(X, 1e-300))
     ctrl = (D == 0)
     treated = (D == 1)
     n0 = ctrl.sum()
@@ -456,7 +457,7 @@ def triply_robust_iv_centered(Y, D, X,
     Z = ea_hat / (1.0 - ea_hat)   # logit odds instrument
 
     # ------------------------------------------------------------------
-    # Step 2: Fit log-logistic PS (e_b) by MLE -> fix gamma_1
+    # Step 2: Fit log-logistic PS (e_b) by MLE
     # ------------------------------------------------------------------
     if eb_basis == 'X':
         eb_feature = X
@@ -467,147 +468,82 @@ def triply_robust_iv_centered(Y, D, X,
     else:
         raise ValueError(f"Unknown eb_basis: {eb_basis}")
 
-    gamma_mle, eb_converged = _log_logistic_mle(D, eb_feature)
-    gamma0_mle = gamma_mle[0]
-    gamma1 = gamma_mle[1]     # fixed from MLE
+    gamma, eb_converged = _log_logistic_mle(D, eb_feature)
+
+    odds_b = gamma[0] + gamma[1] * eb_feature
+    odds_b = np.maximum(odds_b, MIN_ODDS)
+    W = 1.0 + odds_b
+
+    # Telescoping instrument: ob - Z
+    telescope = odds_b - Z
 
     # ------------------------------------------------------------------
-    # Step 3: Center Y and q(X) among controls
+    # Step 3: Exactly-identified IV among controls
+    #   Instruments: {telescope, q, Z}   (3 cols, enforcing M6, M4, M5)
+    #   Regressors:  {1, q, W}           (3 cols)
     # ------------------------------------------------------------------
-    if or_columns == 'X':
-        q = X.copy()
-    elif or_columns == 'logX':
-        q = np.log(np.maximum(X, 1e-300))
+    if or_columns == 'logX':
+        exog_ctrl = np.column_stack([np.ones(n0), logX[ctrl]])
+        exog_all = np.column_stack([np.ones(n), logX])
     elif or_columns == 'logX_X':
-        q = X.copy()
+        exog_ctrl = np.column_stack([np.ones(n0), logX[ctrl], X[ctrl]])
+        exog_all = np.column_stack([np.ones(n), logX, X])
+    elif or_columns == 'X':
+        exog_ctrl = np.column_stack([np.ones(n0), X[ctrl]])
+        exog_all = np.column_stack([np.ones(n), X])
     else:
         raise ValueError(f"Unknown or_columns: {or_columns}")
 
-    Y_bar0 = np.mean(Y[ctrl])
-    q_bar0 = np.mean(q[ctrl])
+    n_exog = exog_ctrl.shape[1]
 
-    Y_tilde = Y - Y_bar0
-    q_tilde = q - q_bar0
+    # Build instrument and regressor matrices
+    # Instruments: replace the constant with telescope; keep q and Z
+    #   For or_columns='X': instruments = [telescope, X, Z]
+    #   For or_columns='logX': instruments = [telescope, logX, Z]
+    q_ctrl = exog_ctrl[:, 1:]  # q columns (without intercept)
+    iv_ctrl = np.column_stack([telescope[ctrl], q_ctrl, Z[ctrl]])
+    reg_ctrl = np.column_stack([exog_ctrl, W[ctrl]])
 
-    # ------------------------------------------------------------------
-    # Step 4: Iterative exactly-identified IV with M6 gamma_0 update
-    # ------------------------------------------------------------------
-    gamma0 = gamma0_mle   # starting value
-    gamma0_path = [gamma0]
-    denom_path = []
-    converged = False
-    beta1 = 0.0
-    phi = 0.0
-    iteration = 0
+    # Just-identified IV: theta = (IV' Reg)^{-1} IV' Y
+    IvR = iv_ctrl.T @ reg_ctrl
+    IvY = iv_ctrl.T @ Y[ctrl]
 
-    for iteration in range(max_iter):
-        # Construct W for all observations
-        odds_b = gamma0 + gamma1 * eb_feature
-        odds_b_safe = np.maximum(odds_b, MIN_ODDS)
-        W = 1.0 + odds_b_safe
-
-        # IV regression among controls, NO intercept:
-        #   Y_tilde = beta1 * q_tilde + phi * W
-        #   Instruments: {q_tilde, Z}
-        #   Regressors:  {q_tilde, W}
-        q_c = q_tilde[ctrl]
-        Z_c = Z[ctrl]
-        W_c = W[ctrl]
-        Y_c = Y_tilde[ctrl]
-
-        iv_mat = np.column_stack([q_c, Z_c])    # n0 x 2
-        reg_mat = np.column_stack([q_c, W_c])   # n0 x 2
-
-        IvR = iv_mat.T @ reg_mat     # 2x2
-        IvY = iv_mat.T @ Y_c        # 2x1
-
-        try:
-            theta = np.linalg.solve(IvR, IvY)
-        except np.linalg.LinAlgError:
-            theta, _, _, _ = np.linalg.lstsq(IvR, IvY, rcond=None)
-
-        beta1 = theta[0]
-        phi = theta[1]
-
-        # Residuals among controls
-        R = Y_c - beta1 * q_c - phi * W_c
-
-        # Closed-form gamma_0 update from M6:
-        #   gamma_0 = [sum Z*R - gamma1 * sum f(X)*R] / [sum R]
-        sum_ZR = np.sum(Z_c * R)
-        sum_fR = np.sum(eb_feature[ctrl] * R)
-        sum_R = np.sum(R)
-
-        denom_path.append(float(sum_R))
-
-        if np.abs(sum_R) < 1e-12:
-            gamma0_new = gamma0
-        else:
-            gamma0_new = (sum_ZR - gamma1 * sum_fR) / sum_R
-
-        gamma0_path.append(float(gamma0_new))
-
-        if np.abs(gamma0_new - gamma0) < tol:
-            converged = True
-            gamma0 = gamma0_new
-            break
-
-        gamma0 = gamma0_new
-
-    # Final W with converged gamma0
-    odds_b_final = gamma0 + gamma1 * eb_feature
-    odds_b_final_safe = np.maximum(odds_b_final, MIN_ODDS)
-    W_final = 1.0 + odds_b_final_safe
-
-    # Re-run final IV with converged gamma0
-    W_c_final = W_final[ctrl]
-    reg_mat_final = np.column_stack([q_tilde[ctrl], W_c_final])
-    iv_mat_final = np.column_stack([q_tilde[ctrl], Z[ctrl]])
-    IvR_f = iv_mat_final.T @ reg_mat_final
-    IvY_f = iv_mat_final.T @ Y_tilde[ctrl]
     try:
-        theta_final = np.linalg.solve(IvR_f, IvY_f)
+        theta = np.linalg.solve(IvR, IvY)
     except np.linalg.LinAlgError:
-        theta_final, _, _, _ = np.linalg.lstsq(IvR_f, IvY_f, rcond=None)
-    beta1 = theta_final[0]
-    phi = theta_final[1]
+        theta, _, _, _ = np.linalg.lstsq(IvR, IvY, rcond=None)
+
+    beta = theta[:n_exog]
+    phi = theta[n_exog]
 
     # ------------------------------------------------------------------
-    # Step 5: Imputation and ATT
+    # Step 4: Impute m0 and compute ATT
     # ------------------------------------------------------------------
-    m0_hat = Y_bar0 + beta1 * q_tilde + phi * W_final
+    m0_hat = exog_all @ beta + phi * W
     tau_att = float(np.mean((Y - m0_hat)[treated]))
 
     # ------------------------------------------------------------------
-    # First-stage F-statistic: Z -> W among controls (no intercept)
+    # First-stage F-statistic (same as S: Z as excluded instrument)
     # ------------------------------------------------------------------
-    fs_r_coef = np.linalg.lstsq(q_tilde[ctrl].reshape(-1, 1),
-                                 W_c_final, rcond=None)[0]
-    W_hat_r = q_tilde[ctrl] * fs_r_coef[0]
-    ssr_r = np.sum((W_c_final - W_hat_r) ** 2)
-
-    fs_u_X = np.column_stack([q_tilde[ctrl], Z[ctrl]])
-    fs_u_coef = np.linalg.lstsq(fs_u_X, W_c_final, rcond=None)[0]
-    W_hat_u = fs_u_X @ fs_u_coef
-    ssr_u = np.sum((W_c_final - W_hat_u) ** 2)
-    first_F = max(0.0, ((ssr_r - ssr_u) / 1.0) / (ssr_u / max(n0 - 2, 1)))
-
-    n_violations = int(np.sum(odds_b_final <= 0))
+    W_ctrl = W[ctrl]
+    Z_ctrl = Z[ctrl]
+    fs_X = np.column_stack([exog_ctrl, Z_ctrl])
+    k_fs = fs_X.shape[1]
+    fs_coef, _, _, _ = np.linalg.lstsq(fs_X, W_ctrl, rcond=None)
+    W_hat_fs = fs_X @ fs_coef
+    fs_coef_r, _, _, _ = np.linalg.lstsq(exog_ctrl, W_ctrl, rcond=None)
+    W_hat_r = exog_ctrl @ fs_coef_r
+    ssr_r = np.sum((W_ctrl - W_hat_r) ** 2)
+    ssr_u = np.sum((W_ctrl - W_hat_fs) ** 2)
+    first_F = max(0.0, ((ssr_r - ssr_u) / 1.0) / (ssr_u / max(n0 - k_fs, 1)))
 
     return {
         'tau_att': tau_att,
-        'beta1': beta1,
+        'beta': beta,
         'phi': phi,
         'alpha': alpha,
-        'gamma': np.array([gamma0, gamma1]),
-        'gamma0_mle': gamma0_mle,
-        'gamma0_final': gamma0,
+        'gamma': gamma,
         'first_F': first_F,
         'eb_converged': eb_converged,
         'm0_hat': m0_hat,
-        'converged': converged,
-        'iterations': iteration + 1,
-        'gamma0_path': gamma0_path,
-        'denom_path': denom_path,
-        'n_violations': n_violations,
     }
