@@ -384,3 +384,230 @@ def triply_robust_iv_full(Y, D, X,
         'eb_converged': eb_converged,
         'm0_hat': m0_hat,
     }
+
+
+# ---------------------------------------------------------------------------
+# Estimator G: Centered exactly-identified estimator with M6
+# ---------------------------------------------------------------------------
+
+def triply_robust_iv_centered(Y, D, X,
+                               ea_basis='X',
+                               eb_basis='expX',
+                               or_columns='X',
+                               max_iter=100,
+                               tol=1e-8):
+    """
+    Centered exactly-identified triply robust ATT estimator (Estimator G).
+
+    Key differences from S and F:
+    1. Uses log-logistic MLE for e_b, but only fixes gamma_1 from MLE;
+       gamma_0 is left free and pinned by M6.
+    2. Centers Y and q(X) around control-group means, drops the intercept.
+    3. Uses exactly-identified IV: instruments {q_tilde, Z} for
+       regressors {q_tilde, W}, enforcing M4 and M5.
+    4. Solves for gamma_0 via a closed-form update from M6, iterating
+       with the IV residuals.
+
+    Parameters
+    ----------
+    Y, D, X : arrays (n,)
+    ea_basis : str -- basis for logit PS ('X', 'sin', 'X2')
+    eb_basis : str -- basis for log-logistic PS ('expX', 'X', 'sin')
+    or_columns : str -- OR columns ('X', 'logX', 'logX_X')
+    max_iter : int -- max iterations for gamma_0 update
+    tol : float -- convergence tolerance for gamma_0
+
+    Returns
+    -------
+    dict with keys: tau_att, beta1, phi, alpha, gamma, gamma0_mle,
+                    gamma0_final, first_F, eb_converged, m0_hat,
+                    converged, iterations, gamma0_path, denom_path
+    """
+    Y = np.asarray(Y, dtype=float)
+    D = np.asarray(D, dtype=float)
+    X = np.asarray(X, dtype=float)
+    n = len(Y)
+
+    ctrl = (D == 0)
+    treated = (D == 1)
+    n0 = ctrl.sum()
+    n1 = treated.sum()
+
+    # ------------------------------------------------------------------
+    # Step 1: Fit logit PS (e_a) by MLE -> odds Z
+    # ------------------------------------------------------------------
+    if ea_basis == 'sin':
+        ea_feature = np.sin(X)
+    elif ea_basis == 'X2':
+        ea_feature = X ** 2
+    elif ea_basis == 'X':
+        ea_feature = X
+    else:
+        raise ValueError(f"Unknown ea_basis: {ea_basis}")
+
+    try:
+        Xa = sm.add_constant(ea_feature)
+        logit_mod = Logit(D, Xa).fit(disp=False, maxiter=200)
+        alpha = logit_mod.params.copy()
+    except Exception:
+        alpha = np.array([0.0, 0.0])
+
+    ea_hat = _clip_ps(_invlogit(alpha[0] + alpha[1] * ea_feature))
+    Z = ea_hat / (1.0 - ea_hat)   # logit odds instrument
+
+    # ------------------------------------------------------------------
+    # Step 2: Fit log-logistic PS (e_b) by MLE -> fix gamma_1
+    # ------------------------------------------------------------------
+    if eb_basis == 'X':
+        eb_feature = X
+    elif eb_basis == 'sin':
+        eb_feature = np.sin(X)
+    elif eb_basis == 'expX':
+        eb_feature = np.exp(X)
+    else:
+        raise ValueError(f"Unknown eb_basis: {eb_basis}")
+
+    gamma_mle, eb_converged = _log_logistic_mle(D, eb_feature)
+    gamma0_mle = gamma_mle[0]
+    gamma1 = gamma_mle[1]     # fixed from MLE
+
+    # ------------------------------------------------------------------
+    # Step 3: Center Y and q(X) among controls
+    # ------------------------------------------------------------------
+    if or_columns == 'X':
+        q = X.copy()
+    elif or_columns == 'logX':
+        q = np.log(np.maximum(X, 1e-300))
+    elif or_columns == 'logX_X':
+        q = X.copy()
+    else:
+        raise ValueError(f"Unknown or_columns: {or_columns}")
+
+    Y_bar0 = np.mean(Y[ctrl])
+    q_bar0 = np.mean(q[ctrl])
+
+    Y_tilde = Y - Y_bar0
+    q_tilde = q - q_bar0
+
+    # ------------------------------------------------------------------
+    # Step 4: Iterative exactly-identified IV with M6 gamma_0 update
+    # ------------------------------------------------------------------
+    gamma0 = gamma0_mle   # starting value
+    gamma0_path = [gamma0]
+    denom_path = []
+    converged = False
+    beta1 = 0.0
+    phi = 0.0
+    iteration = 0
+
+    for iteration in range(max_iter):
+        # Construct W for all observations
+        odds_b = gamma0 + gamma1 * eb_feature
+        odds_b_safe = np.maximum(odds_b, MIN_ODDS)
+        W = 1.0 + odds_b_safe
+
+        # IV regression among controls, NO intercept:
+        #   Y_tilde = beta1 * q_tilde + phi * W
+        #   Instruments: {q_tilde, Z}
+        #   Regressors:  {q_tilde, W}
+        q_c = q_tilde[ctrl]
+        Z_c = Z[ctrl]
+        W_c = W[ctrl]
+        Y_c = Y_tilde[ctrl]
+
+        iv_mat = np.column_stack([q_c, Z_c])    # n0 x 2
+        reg_mat = np.column_stack([q_c, W_c])   # n0 x 2
+
+        IvR = iv_mat.T @ reg_mat     # 2x2
+        IvY = iv_mat.T @ Y_c        # 2x1
+
+        try:
+            theta = np.linalg.solve(IvR, IvY)
+        except np.linalg.LinAlgError:
+            theta, _, _, _ = np.linalg.lstsq(IvR, IvY, rcond=None)
+
+        beta1 = theta[0]
+        phi = theta[1]
+
+        # Residuals among controls
+        R = Y_c - beta1 * q_c - phi * W_c
+
+        # Closed-form gamma_0 update from M6:
+        #   gamma_0 = [sum Z*R - gamma1 * sum f(X)*R] / [sum R]
+        sum_ZR = np.sum(Z_c * R)
+        sum_fR = np.sum(eb_feature[ctrl] * R)
+        sum_R = np.sum(R)
+
+        denom_path.append(float(sum_R))
+
+        if np.abs(sum_R) < 1e-12:
+            gamma0_new = gamma0
+        else:
+            gamma0_new = (sum_ZR - gamma1 * sum_fR) / sum_R
+
+        gamma0_path.append(float(gamma0_new))
+
+        if np.abs(gamma0_new - gamma0) < tol:
+            converged = True
+            gamma0 = gamma0_new
+            break
+
+        gamma0 = gamma0_new
+
+    # Final W with converged gamma0
+    odds_b_final = gamma0 + gamma1 * eb_feature
+    odds_b_final_safe = np.maximum(odds_b_final, MIN_ODDS)
+    W_final = 1.0 + odds_b_final_safe
+
+    # Re-run final IV with converged gamma0
+    W_c_final = W_final[ctrl]
+    reg_mat_final = np.column_stack([q_tilde[ctrl], W_c_final])
+    iv_mat_final = np.column_stack([q_tilde[ctrl], Z[ctrl]])
+    IvR_f = iv_mat_final.T @ reg_mat_final
+    IvY_f = iv_mat_final.T @ Y_tilde[ctrl]
+    try:
+        theta_final = np.linalg.solve(IvR_f, IvY_f)
+    except np.linalg.LinAlgError:
+        theta_final, _, _, _ = np.linalg.lstsq(IvR_f, IvY_f, rcond=None)
+    beta1 = theta_final[0]
+    phi = theta_final[1]
+
+    # ------------------------------------------------------------------
+    # Step 5: Imputation and ATT
+    # ------------------------------------------------------------------
+    m0_hat = Y_bar0 + beta1 * q_tilde + phi * W_final
+    tau_att = float(np.mean((Y - m0_hat)[treated]))
+
+    # ------------------------------------------------------------------
+    # First-stage F-statistic: Z -> W among controls (no intercept)
+    # ------------------------------------------------------------------
+    fs_r_coef = np.linalg.lstsq(q_tilde[ctrl].reshape(-1, 1),
+                                 W_c_final, rcond=None)[0]
+    W_hat_r = q_tilde[ctrl] * fs_r_coef[0]
+    ssr_r = np.sum((W_c_final - W_hat_r) ** 2)
+
+    fs_u_X = np.column_stack([q_tilde[ctrl], Z[ctrl]])
+    fs_u_coef = np.linalg.lstsq(fs_u_X, W_c_final, rcond=None)[0]
+    W_hat_u = fs_u_X @ fs_u_coef
+    ssr_u = np.sum((W_c_final - W_hat_u) ** 2)
+    first_F = max(0.0, ((ssr_r - ssr_u) / 1.0) / (ssr_u / max(n0 - 2, 1)))
+
+    n_violations = int(np.sum(odds_b_final <= 0))
+
+    return {
+        'tau_att': tau_att,
+        'beta1': beta1,
+        'phi': phi,
+        'alpha': alpha,
+        'gamma': np.array([gamma0, gamma1]),
+        'gamma0_mle': gamma0_mle,
+        'gamma0_final': gamma0,
+        'first_F': first_F,
+        'eb_converged': eb_converged,
+        'm0_hat': m0_hat,
+        'converged': converged,
+        'iterations': iteration + 1,
+        'gamma0_path': gamma0_path,
+        'denom_path': denom_path,
+        'n_violations': n_violations,
+    }
