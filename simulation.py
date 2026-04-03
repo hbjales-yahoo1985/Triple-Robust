@@ -8,7 +8,8 @@ Run:
 
 The script runs R = 1000 Monte Carlo replications for each of four DGPs
 (n = 2000 per replication) and prints a summary table comparing:
-  - Triply Robust (TR) estimator
+  - Triply Robust (TR) estimator  [sequential two-step: logit MLE for alpha,
+                                    then solve M3-M7 for the rest]
   - Naive OLS imputation
   - Standard AIPW (logit-on-sin PS only)
   - IPW (logit-on-sin PS only)
@@ -225,13 +226,15 @@ def run_dgp3_oracle_diagnostic(R=1000, n=2000, seed=42):
     """
     Oracle-alpha diagnostic for DGP 3 (§4.2 Bang-Robins channel).
 
-    Runs two variants on DGP 3 in parallel:
-      - TR_oracle : alpha fixed to true values (1.5, -0.8), solves M3-M7 only
-      - TR_full   : standard 7-equation TR estimator (estimated alpha)
+    Both variants use the sequential two-step estimator (logit MLE for alpha,
+    then solve M3-M7).  They differ only in where alpha comes from:
 
-    If TR_oracle converges and is unbiased while TR_full fails, the §4.2
-    failure is *solely* due to poor logit estimation of alpha in this DGP.
-    If TR_oracle also fails, there is a deeper issue in the moment system.
+      - TR (estimated alpha) : alpha estimated by logit MLE  [standard mode]
+      - TR (oracle alpha)    : alpha fixed to the DGP-3 true values (1.5, -0.8)
+
+    Comparing the two isolates whether any remaining bias/non-convergence in
+    DGP 3 is caused by error in the logit MLE of alpha, or by a structural
+    problem in the M3-M7 sub-system itself.
 
     True alpha: alpha0=1.5, alpha1=-0.8  (DGP 3 true propensity e_a parameters)
     True ATT  : 4.0
@@ -247,27 +250,27 @@ def run_dgp3_oracle_diagnostic(R=1000, n=2000, seed=42):
 
     rng = np.random.default_rng(seed + 3)
 
-    oracle_list, full_list = [], []
+    oracle_list, est_list = [], []
     n_oracle_conv = 0
-    n_full_conv = 0
+    n_est_conv = 0
 
     for _ in range(R):
         Y, D, X = dgp3(rng, n)
 
-        # Oracle: fix alpha to truth, solve M3-M7
+        # Oracle: skip logit MLE, pin alpha to DGP-3 truth
         res_oracle = triply_robust_att(Y, D, X, alpha_oracle=ALPHA_TRUE)
         if res_oracle['converged']:
             oracle_list.append(res_oracle['tau_att'])
             n_oracle_conv += 1
 
-        # Full: standard 7-equation estimator
-        res_full = triply_robust_att(Y, D, X)
-        if res_full['converged']:
-            full_list.append(res_full['tau_att'])
-            n_full_conv += 1
+        # Standard: logit MLE for alpha (two-step sequential)
+        res_est = triply_robust_att(Y, D, X)
+        if res_est['converged']:
+            est_list.append(res_est['tau_att'])
+            n_est_conv += 1
 
     oracle_conv_pct = 100.0 * n_oracle_conv / R
-    full_conv_pct = 100.0 * n_full_conv / R
+    est_conv_pct = 100.0 * n_est_conv / R
 
     def _summary(lst, label, conv_pct):
         if lst:
@@ -277,25 +280,29 @@ def run_dgp3_oracle_diagnostic(R=1000, n=2000, seed=42):
             rmse = float(np.sqrt(bias ** 2 + sd ** 2))
         else:
             bias = sd = rmse = float('nan')
-        print(f"  {label:<22}  Bias={bias:+.4f}  RMSE={rmse:.4f}  SD={sd:.4f}  "
+        print(f"  {label:<26}  Bias={bias:+.4f}  RMSE={rmse:.4f}  SD={sd:.4f}  "
               f"Conv={conv_pct:.1f}%")
 
-    _summary(oracle_list, "TR (oracle alpha)", oracle_conv_pct)
-    _summary(full_list,   "TR (estimated alpha)", full_conv_pct)
+    _summary(oracle_list, "TR (oracle alpha)",    oracle_conv_pct)
+    _summary(est_list,    "TR (estimated alpha)", est_conv_pct)
 
     print()
     if oracle_conv_pct > 50 and oracle_list:
         oracle_bias = abs(np.mean(oracle_list) - TRUE_ATT)
         if oracle_bias < 0.1:
-            print("  => Oracle α converges with small bias: §4.2 failure is due")
-            print("     to logit estimation of alpha in this DGP, not the moment system.")
+            print("  => Oracle α: small bias.  M3-M7 sub-system is sound.")
+            if est_conv_pct < oracle_conv_pct - 10 or (
+                    est_list and abs(np.mean(est_list) - TRUE_ATT) > 0.2):
+                print("     Estimated α: worse performance — logit MLE of alpha is the")
+                print("     limiting factor for DGP 3, not the M3-M7 moment structure.")
+            else:
+                print("     Estimated α performs similarly — logit MLE is reliable here.")
         else:
             print("  => Oracle α converges but bias is non-trivial: investigate")
-            print("     the remaining moment conditions M3-M7 (possible proof issue).")
+            print("     the M3-M7 sub-system itself (possible proof/design issue).")
     else:
-        print("  => Oracle α also fails to converge: the issue is NOT just logit")
-        print("     estimation of alpha. The M3-M7 subsystem itself is problematic.")
-        print("     This may indicate a subtle issue in the §4.2 proof or moment design.")
+        print("  => Oracle α also fails: the issue is in M3-M7, not the logit step.")
+        print("     This may indicate a structural problem beyond alpha estimation.")
     print()
 
 

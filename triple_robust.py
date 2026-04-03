@@ -4,9 +4,33 @@ Triply Robust ATT Estimator
 Implements the triply robust estimator for the Average Treatment Effect on
 the Treated (ATT) described in the specification.
 
-The estimator is a pure imputation estimator whose imputation model m0_hat
-is estimated via a GMM system that embeds two propensity score models into
-the moment conditions.
+The estimator uses a sequential two-step procedure that respects the block-
+triangular structure of the moment conditions:
+
+  Step 1 - Estimate alpha via standard logit MLE.
+            M1 = E[(D - e_a) * 1]  = 0
+            M2 = E[(D - e_a) * sin(X)] = 0
+            These two equations involve only (alpha0, alpha1) and are completely
+            decoupled from all other parameters.  Standard MLE solves them
+            optimally and there is no benefit to folding them into a larger system.
+
+  Step 2 - With alpha fixed at alpha-hat, solve for (phi, gamma0, gamma1) via
+            M5-M7, concentrating out (beta0, beta1) analytically via OLS (M3-M4).
+
+            The key structural observation is that M3 and M4 are the OLS normal
+            equations for regressing (Y - phi/(1 - e_b)) on (1, log(X)) among
+            controls.  Given any trial (phi, gamma0, gamma1), they therefore
+            determine (beta0, beta1) in closed form via OLS -- no solver needed.
+
+            Substituting this concentrated solution back reduces the problem to
+            finding (phi, gamma0, gamma1) that satisfy M5-M7:
+              M5 = E[(1-D) * odds_a * R] = 0
+              M6 = E[(1-D) * (odds_b - odds_a) * R] = 0
+              M7 = E[(1-D) * X * (odds_b - odds_a) * R] = 0
+            where R = Y - m0,  m0 = beta0(phi,g) + beta1(phi,g)*log(X) + phi/(1-e_b).
+
+            This concentrated 3x3 system is smaller, better-conditioned, and
+            faster to solve than the original 5x5 or 7x7 system.
 """
 
 import numpy as np
@@ -40,6 +64,11 @@ def triply_robust_att(Y, D, X, alpha_oracle=None):
     """
     Triply robust estimator for the Average Treatment Effect on the Treated.
 
+    Uses a sequential two-step procedure:
+      Step 1: estimate (alpha0, alpha1) via logit MLE on D ~ sin(X).
+      Step 2: with alpha fixed, solve M5-M7 for (phi, gamma0, gamma1),
+              concentrating out (beta0, beta1) analytically via OLS (M3-M4).
+
     Parameters
     ----------
     Y : array-like, shape (n,)
@@ -49,22 +78,21 @@ def triply_robust_att(Y, D, X, alpha_oracle=None):
     X : array-like, shape (n,)
         Single pre-treatment covariate.
     alpha_oracle : array-like of length 2, optional
-        If provided, (alpha0, alpha1) are fixed to these oracle values and M1/M2
-        are dropped.  Only M3–M7 are solved for (gamma0, gamma1, beta0, beta1, phi).
-        Useful for isolating whether DGP-3 failures stem from logit estimation
-        of e_a or from a deeper issue in the remaining moment conditions (§4.2).
+        If provided, Step 1 is skipped and (alpha0, alpha1) are fixed to
+        these values.  Useful for diagnostic comparisons (e.g. section 4.2
+        oracle experiment).
 
     Returns
     -------
     dict with keys:
-        tau_att   : float  — ATT point estimate
-        beta      : (beta0, beta1)  — outcome regression parameters
-        phi       : float — augmentation coefficient
-        alpha     : (alpha0, alpha1) — augmentation PS (logit) parameters
-        gamma     : (gamma0, gamma1) — balance PS (probit) parameters
-        m0_hat    : array, shape (n,) — fitted imputation values
-        converged : bool
-        oracle_alpha : bool — True when alpha was pinned to supplied oracle values
+        tau_att      : float  -- ATT point estimate
+        beta         : (beta0, beta1)  -- outcome regression parameters
+        phi          : float -- augmentation coefficient
+        alpha        : (alpha0, alpha1) -- augmentation PS (logit) parameters
+        gamma        : (gamma0, gamma1) -- balance PS (probit) parameters
+        m0_hat       : array, shape (n,) -- fitted imputation values
+        converged    : bool -- True if M5-M7 solver norm < 1e-4
+        oracle_alpha : bool -- True when alpha was supplied via alpha_oracle
     """
     Y = np.asarray(Y, dtype=float)
     D = np.asarray(D, dtype=float)
@@ -74,27 +102,72 @@ def triply_robust_att(Y, D, X, alpha_oracle=None):
     logX = np.log(np.maximum(X, 1e-300))   # guard log(0)
     sinX = np.sin(X)
     ctrl = (D == 0)   # boolean mask for control units
+    w    = 1.0 - D    # same, as float weights
+
+    # ------------------------------------------------------------------
+    # Step 1: Estimate alpha via logit MLE  (or accept oracle values)
+    # ------------------------------------------------------------------
+    # M1 and M2 involve only (alpha0, alpha1).  They are the score equations
+    # of a logit model for D on sin(X), completely decoupled from everything
+    # else.  Standard MLE is the efficient solver for this sub-problem.
+    # ------------------------------------------------------------------
 
     use_oracle_alpha = alpha_oracle is not None
+
     if use_oracle_alpha:
-        a0_fixed, a1_fixed = float(alpha_oracle[0]), float(alpha_oracle[1])
-
-    # ------------------------------------------------------------------
-    # Step 1: Starting values
-    # ------------------------------------------------------------------
-
-    # a) Logit of D on sin(X) -> alpha starting values (skipped when oracle)
-    if not use_oracle_alpha:
+        a0_hat, a1_hat = float(alpha_oracle[0]), float(alpha_oracle[1])
+    else:
         try:
             Xa = sm.add_constant(sinX)
             logit_mod = Logit(D, Xa).fit(disp=False, maxiter=200)
-            alpha0_init, alpha1_init = logit_mod.params
+            a0_hat, a1_hat = logit_mod.params
         except Exception:
-            alpha0_init, alpha1_init = 0.0, 0.0
-    else:
-        alpha0_init, alpha1_init = a0_fixed, a1_fixed
+            a0_hat, a1_hat = 0.0, 0.0
 
-    # b) Probit of D on X -> gamma starting values
+    # Pre-compute the fixed propensity score and its odds ratio
+    ea_hat = _clip_ps(_invlogit(a0_hat + a1_hat * sinX))
+    odds_a = ea_hat / (1.0 - ea_hat)
+
+    # ------------------------------------------------------------------
+    # Step 2: Solve M5-M7 for (phi, gamma0, gamma1), concentrating out
+    #         (beta0, beta1) analytically via OLS (M3-M4).
+    # ------------------------------------------------------------------
+    # For any trial (phi, g0, g1), M3=M4=0 determines (beta0, beta1)
+    # as the OLS fit of [Y - phi/(1-e_b)] on [1, log(X)] among controls.
+    # ------------------------------------------------------------------
+
+    def _beta_from_ols(phi, eb_ctrl):
+        """Solve M3=M4=0 analytically: OLS of adjusted Y on (1, logX) for controls."""
+        adj_Y = Y[ctrl] - phi / (1.0 - eb_ctrl)
+        Xc = np.column_stack([np.ones(ctrl.sum()), logX[ctrl]])
+        coef, _, _, _ = np.linalg.lstsq(Xc, adj_Y, rcond=None)
+        return coef[0], coef[1]
+
+    def moment_conditions_concentrated(pgg):
+        """M5, M6, M7 as a function of (phi, gamma0, gamma1) only."""
+        phi, g0, g1 = pgg
+
+        # Guard: if the probit index is extreme the augmentation term blows up.
+        # Return a large residual to steer the solver away from those regions.
+        idx_g = g0 + g1 * X
+        if np.any(np.abs(idx_g) > 20) or np.abs(phi) > 1e4:
+            return np.array([1e6, 1e6, 1e6])
+
+        eb     = _clip_ps(norm.cdf(idx_g))
+        b0, b1 = _beta_from_ols(phi, eb[ctrl])
+
+        m0  = b0 + b1 * logX + phi / (1.0 - eb)
+        Res = Y - m0
+
+        odds_b = eb / (1.0 - eb)
+
+        M5 = np.mean(w * odds_a * Res)
+        M6 = np.mean(w * (odds_b - odds_a) * Res)
+        M7 = np.mean(w * X * (odds_b - odds_a) * Res)
+
+        return np.array([M5, M6, M7])
+
+    # Starting values for (phi, gamma0, gamma1)
     try:
         Xb = sm.add_constant(X)
         probit_mod = Probit(D, Xb).fit(disp=False, maxiter=200)
@@ -102,168 +175,86 @@ def triply_robust_att(Y, D, X, alpha_oracle=None):
     except Exception:
         gamma0_init, gamma1_init = 0.0, 0.0
 
-    # c) OLS of Y on log(X) among controls -> beta starting values
-    try:
-        Xc = sm.add_constant(logX[ctrl])
-        ols_mod = sm.OLS(Y[ctrl], Xc).fit()
-        beta0_init, beta1_init = ols_mod.params
-    except Exception:
-        beta0_init, beta1_init = float(np.mean(Y[ctrl])), 0.0
-
-    # d) phi starting value
     phi_init = 0.0
+    pgg0 = np.array([phi_init, gamma0_init, gamma1_init])
 
-    # ------------------------------------------------------------------
-    # Step 2: Solve moment conditions
-    # ------------------------------------------------------------------
-    # Full mode  : 7 equations, 7 unknowns (a0,a1,g0,g1,b0,b1,phi)
-    # Oracle mode: 5 equations, 5 unknowns (g0,g1,b0,b1,phi); alpha fixed
-    # ------------------------------------------------------------------
-
-    if not use_oracle_alpha:
-        theta0 = np.array([alpha0_init, alpha1_init,
-                           gamma0_init, gamma1_init,
-                           beta0_init, beta1_init,
-                           phi_init])
-
-        def moment_conditions(theta):
-            a0, a1, g0, g1, b0, b1, phi = theta
-
-            idx_a = a0 + a1 * sinX
-            ea = _clip_ps(_invlogit(idx_a))
-
-            idx_g = g0 + g1 * X
-            eb = _clip_ps(norm.cdf(idx_g))
-
-            m0 = b0 + b1 * logX + phi / (1.0 - eb)
-            R = Y - m0
-
-            odds_a = ea / (1.0 - ea)
-            odds_b = eb / (1.0 - eb)
-
-            w = 1.0 - D   # indicator for control units
-
-            M1 = np.mean((D - ea) * 1.0)
-            M2 = np.mean((D - ea) * sinX)
-            M3 = np.mean(w * R)
-            M4 = np.mean(w * logX * R)
-            M5 = np.mean(w * odds_a * R)
-            M6 = np.mean(w * (odds_b - odds_a) * R)
-            M7 = np.mean(w * X * (odds_b - odds_a) * R)
-
-            return np.array([M1, M2, M3, M4, M5, M6, M7])
-
-    else:
-        # Oracle mode: alpha pinned, solve 5-equation system for (g0,g1,b0,b1,phi)
-        theta0 = np.array([gamma0_init, gamma1_init,
-                           beta0_init, beta1_init,
-                           phi_init])
-
-        ea_fixed = _clip_ps(_invlogit(a0_fixed + a1_fixed * sinX))
-        odds_a_fixed = ea_fixed / (1.0 - ea_fixed)
-
-        def moment_conditions(theta):
-            g0, g1, b0, b1, phi = theta
-
-            idx_g = g0 + g1 * X
-            eb = _clip_ps(norm.cdf(idx_g))
-
-            m0 = b0 + b1 * logX + phi / (1.0 - eb)
-            R = Y - m0
-
-            odds_b = eb / (1.0 - eb)
-
-            w = 1.0 - D   # indicator for control units
-
-            M3 = np.mean(w * R)
-            M4 = np.mean(w * logX * R)
-            M5 = np.mean(w * odds_a_fixed * R)
-            M6 = np.mean(w * (odds_b - odds_a_fixed) * R)
-            M7 = np.mean(w * X * (odds_b - odds_a_fixed) * R)
-
-            return np.array([M3, M4, M5, M6, M7])
-
-    # Convergence tolerance: accept if norm of moments is below this threshold
     _CONV_TOL = 1e-4
 
-    best_theta = None
+    best_pgg  = None
     best_norm = np.inf
 
-    # --- Pass 1: Powell hybrid (fast, accurate) ---
+    # --- Pass 1: Powell hybrid ---
     try:
-        sol = root(moment_conditions, theta0, method='hybr',
-                   options={'maxfev': 20_000, 'xtol': 1e-10})
-        cand_norm = np.linalg.norm(moment_conditions(sol.x))
+        sol = root(moment_conditions_concentrated, pgg0, method='hybr',
+                   options={'maxfev': 5_000, 'xtol': 1e-8})
+        cand_norm = np.linalg.norm(moment_conditions_concentrated(sol.x))
         if cand_norm < best_norm:
             best_norm = cand_norm
-            best_theta = sol.x.copy()
+            best_pgg  = sol.x.copy()
     except Exception:
         pass
 
     # --- Pass 2: Levenberg-Marquardt root-finder ---
-    if best_theta is None or best_norm >= _CONV_TOL:
+    if best_pgg is None or best_norm >= _CONV_TOL:
         try:
-            sol2 = root(moment_conditions, theta0, method='lm',
-                        options={'maxiter': 20_000, 'col_deriv': 0})
-            cand_norm = np.linalg.norm(moment_conditions(sol2.x))
+            sol2 = root(moment_conditions_concentrated, pgg0, method='lm',
+                        options={'maxiter': 5_000, 'col_deriv': 0})
+            cand_norm = np.linalg.norm(moment_conditions_concentrated(sol2.x))
             if cand_norm < best_norm:
                 best_norm = cand_norm
-                best_theta = sol2.x.copy()
+                best_pgg  = sol2.x.copy()
         except Exception:
             pass
 
     # --- Pass 3: Levenberg-Marquardt least-squares minimiser ---
-    if best_theta is None or best_norm >= _CONV_TOL:
+    if best_pgg is None or best_norm >= _CONV_TOL:
         try:
-            ls_sol = least_squares(moment_conditions, theta0, method='lm',
-                                   max_nfev=100_000, ftol=1e-12, xtol=1e-12)
+            ls_sol = least_squares(moment_conditions_concentrated, pgg0,
+                                   method='lm', max_nfev=10_000,
+                                   ftol=1e-8, xtol=1e-8)
             cand_norm = np.linalg.norm(ls_sol.fun)
             if cand_norm < best_norm:
                 best_norm = cand_norm
-                best_theta = ls_sol.x.copy()
+                best_pgg  = ls_sol.x.copy()
         except Exception:
             pass
 
     # --- Pass 4: Perturbed starting values (tiebreaker for stuck solvers) ---
-    if best_theta is None or best_norm >= _CONV_TOL:
+    if best_pgg is None or best_norm >= _CONV_TOL:
         rng_perturb = np.random.default_rng(0)
         for _ in range(5):
-            theta_pert = theta0 + rng_perturb.normal(0, 0.5, size=len(theta0))
+            pgg_pert = pgg0 + rng_perturb.normal(0, 0.5, size=3)
             try:
-                sol_p = root(moment_conditions, theta_pert, method='hybr',
-                             options={'maxfev': 10_000, 'xtol': 1e-10})
-                cand_norm = np.linalg.norm(moment_conditions(sol_p.x))
+                sol_p = root(moment_conditions_concentrated, pgg_pert,
+                             method='hybr', options={'maxfev': 3_000, 'xtol': 1e-8})
+                cand_norm = np.linalg.norm(moment_conditions_concentrated(sol_p.x))
                 if cand_norm < best_norm:
                     best_norm = cand_norm
-                    best_theta = sol_p.x.copy()
+                    best_pgg  = sol_p.x.copy()
                     if best_norm < _CONV_TOL:
                         break
             except Exception:
                 continue
 
-    theta_hat = best_theta if best_theta is not None else theta0
+    pgg_hat   = best_pgg if best_pgg is not None else pgg0
     converged = bool(best_norm < _CONV_TOL)
 
     # ------------------------------------------------------------------
-    # Step 3: Unpack solution and compute the ATT
+    # Step 3: Recover beta from concentrated-out OLS and compute the ATT
     # ------------------------------------------------------------------
 
-    if not use_oracle_alpha:
-        a0_h, a1_h, g0_h, g1_h, b0_h, b1_h, phi_h = theta_hat
-    else:
-        a0_h, a1_h = a0_fixed, a1_fixed
-        g0_h, g1_h, b0_h, b1_h, phi_h = theta_hat
-
+    phi_h, g0_h, g1_h = pgg_hat
     eb_hat = _clip_ps(norm.cdf(g0_h + g1_h * X))
-    m0_hat = b0_h + b1_h * logX + phi_h / (1.0 - eb_hat)
+    b0_h, b1_h = _beta_from_ols(phi_h, eb_hat[ctrl])
 
+    m0_hat  = b0_h + b1_h * logX + phi_h / (1.0 - eb_hat)
     tau_att = float(np.mean((Y - m0_hat)[D == 1]))
 
     return {
         'tau_att': tau_att,
         'beta': (b0_h, b1_h),
         'phi': phi_h,
-        'alpha': (a0_h, a1_h),
+        'alpha': (a0_hat, a1_hat),
         'gamma': (g0_h, g1_h),
         'm0_hat': m0_hat,
         'converged': converged,
