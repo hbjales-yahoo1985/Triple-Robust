@@ -140,12 +140,10 @@ def run_simulation(R=10, sample_sizes=None, seed=42):
     # --- Define cases ---
     # (label, kappa, eb_basis, estimator_fn, estimator_name)
     cases = [
-        # Case A: only e_b correct
+        # Case A: only e_b correct — run S, F, and N (negative control)
         ('A-S', 0.0,  'expX', triply_robust_iv,      'S (simplified)'),
         ('A-F', 0.0,  'expX', triply_robust_iv_full,  'F (full + M6)'),
         ('A-N', 0.0,  'X',    triply_robust_iv,      'N (wrong e_b)'),
-        # Case B: wrong e_b (= negative control)
-        ('B',   0.0,  'X',    triply_robust_iv,      'N (wrong e_b)'),
         # Case C: near-miss e_b
         ('C',   0.05, 'expX', triply_robust_iv,      'S (near-miss)'),
     ]
@@ -289,10 +287,11 @@ def run_simulation(R=10, sample_sizes=None, seed=42):
             print(f"{n_val:>6}  {np.mean(np.abs(diffs)):>18.6f}  "
                   f"{np.std(diffs):>16.6f}  {np.max(np.abs(diffs)):>18.6f}")
 
-    print(f"\nExpected: S bias → 0 as n grows (Cases A-S).")
-    print(f"          |S - F| → 0 as n grows.")
-    print(f"          N biased at all n (Cases A-N / B).")
-    print(f"          C shows mild degradation from κ={0.05}.")
+    print(f"\nKey comparisons:")
+    print(f"  F (full+M6): bias should → 0 as n grows.")
+    print(f"  S (simplified): may retain persistent bias if e_b channel requires M6.")
+    print(f"  N (wrong e_b): biased at all n (negative control).")
+    print(f"  C (near-miss): shows degradation from κ={0.05}.")
 
     # --- Plots ---
     if R >= 5:

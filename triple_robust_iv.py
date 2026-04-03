@@ -268,7 +268,7 @@ def triply_robust_iv_full(Y, D, X,
     X = np.asarray(X, dtype=float)
     n = len(Y)
 
-    logX = np.log(np.maximum(np.abs(X) + 1e-300, 1e-300))
+    logX = np.log(np.maximum(X, 1e-300))
     ctrl = (D == 0)
     treated = (D == 1)
     n1 = treated.sum()
