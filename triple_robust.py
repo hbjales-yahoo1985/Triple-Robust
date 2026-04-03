@@ -235,3 +235,171 @@ def triply_robust_att(Y, D, X, alpha_oracle=None, l2_penalty=0.01):
         'converged': converged,
         'oracle_alpha': use_oracle_alpha,
     }
+
+
+# ---------------------------------------------------------------------------
+# V2: Unified concentration — (beta0, beta1, phi) solved jointly via M3+M4+M5
+# ---------------------------------------------------------------------------
+
+def triply_robust_att_v2(Y, D, X, alpha_oracle=None, l2_penalty=0.01):
+    """
+    Triply robust ATT estimator — unified concentration variant.
+
+    Key difference from v1: instead of concentrating out only (beta0, beta1)
+    via M3+M4 and leaving phi for the nonlinear solver, we concentrate out
+    ALL THREE (beta0, beta1, phi) via the 3x3 linear system M3+M4+M5.
+
+    This reduces the outer nonlinear problem from 3 unknowns (phi, gamma0,
+    gamma1) to just 2 unknowns (gamma0, gamma1) via M6+M7.
+
+    The 3x3 system is a linear IV / method-of-moments system:
+      M3: instrument = 1,      regressor columns = [1, logX, 1/(1-e_b)]
+      M4: instrument = logX,   regressor columns = [1, logX, 1/(1-e_b)]
+      M5: instrument = odds_a, regressor columns = [1, logX, 1/(1-e_b)]
+
+    Solving Z' * W * theta = Z' * Y_ctrl where Z = [1, logX, odds_a] and
+    W = [1, logX, h] with h = 1/(1-e_b).
+
+    Parameters / Returns: same as triply_robust_att (see docstring there).
+    """
+    Y = np.asarray(Y, dtype=float)
+    D = np.asarray(D, dtype=float)
+    X = np.asarray(X, dtype=float)
+    n = len(Y)
+
+    logX = np.log(np.maximum(X, 1e-300))
+    sinX = np.sin(X)
+    ctrl = (D == 0)
+    w    = 1.0 - D
+
+    # ------------------------------------------------------------------
+    # Step 1: Estimate alpha via logit MLE (or accept oracle values)
+    # ------------------------------------------------------------------
+    use_oracle_alpha = alpha_oracle is not None
+
+    if use_oracle_alpha:
+        a0_hat, a1_hat = float(alpha_oracle[0]), float(alpha_oracle[1])
+    else:
+        try:
+            Xa = sm.add_constant(sinX)
+            logit_mod = Logit(D, Xa).fit(disp=False, maxiter=200)
+            a0_hat, a1_hat = logit_mod.params
+        except Exception:
+            a0_hat, a1_hat = 0.0, 0.0
+
+    ea_hat = _clip_ps(_invlogit(a0_hat + a1_hat * sinX))
+    odds_a = ea_hat / (1.0 - ea_hat)
+
+    # ------------------------------------------------------------------
+    # Step 2: Unified concentration — solve M3+M4+M5 as 3x3 linear system
+    #         for (beta0, beta1, phi), then only M6+M7 remain for (gamma).
+    # ------------------------------------------------------------------
+
+    # Control-unit slices (pre-computed once)
+    Y_ctrl   = Y[ctrl]
+    logX_ctrl = logX[ctrl]
+    odds_a_ctrl = odds_a[ctrl]
+
+    def _beta_phi_from_linear(eb_ctrl):
+        """
+        Solve M3+M4+M5 = 0 jointly for (beta0, beta1, phi).
+
+        The system is Z' * W * theta = Z' * Y_ctrl where:
+          Z = [1, logX, odds_a]   (instruments)
+          W = [1, logX, h]        (regressors, h = 1/(1-e_b))
+          theta = [beta0, beta1, phi]
+        """
+        h = 1.0 / (1.0 - eb_ctrl)  # augmentation regressor
+
+        # Instrument matrix (n_ctrl x 3)
+        Z = np.column_stack([np.ones(ctrl.sum()), logX_ctrl, odds_a_ctrl])
+        # Regressor matrix (n_ctrl x 3)
+        W = np.column_stack([np.ones(ctrl.sum()), logX_ctrl, h])
+
+        A = Z.T @ W        # 3x3
+        b = Z.T @ Y_ctrl   # 3x1
+
+        try:
+            theta = np.linalg.solve(A, b)
+        except np.linalg.LinAlgError:
+            # Fallback: least-squares if singular
+            theta, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+
+        return theta[0], theta[1], theta[2]  # beta0, beta1, phi
+
+    def moment_conditions_v2(gg):
+        """M6, M7 as a function of (gamma0, gamma1) only — phi concentrated out."""
+        g0, g1 = gg
+
+        idx_g = g0 + g1 * X
+        if np.any(np.abs(idx_g) > 20):
+            return np.array([1e6, 1e6])
+
+        eb     = _clip_ps(norm.cdf(idx_g))
+        b0, b1, phi = _beta_phi_from_linear(eb[ctrl])
+
+        m0  = b0 + b1 * logX + phi / (1.0 - eb)
+        Res = Y - m0
+
+        odds_b = eb / (1.0 - eb)
+
+        M6 = np.mean(w * (odds_b - odds_a) * Res)
+        M7 = np.mean(w * X * (odds_b - odds_a) * Res)
+
+        return np.array([M6, M7])
+
+    # Starting values for (gamma0, gamma1)
+    try:
+        Xb = sm.add_constant(X)
+        probit_mod = Probit(D, Xb).fit(disp=False, maxiter=200)
+        gamma0_init, gamma1_init = probit_mod.params
+    except Exception:
+        gamma0_init, gamma1_init = 0.0, 0.0
+
+    gg0 = np.array([gamma0_init, gamma1_init])
+
+    # ------------------------------------------------------------------
+    # Penalised residual vector (4-element: M6, M7, + ridge on gamma)
+    # No penalty on phi needed — it's determined by the linear system.
+    # ------------------------------------------------------------------
+    sq_lam = np.sqrt(l2_penalty)
+
+    def penalized_residuals_v2(gg):
+        moments = moment_conditions_v2(gg)
+        return np.concatenate([moments, sq_lam * (gg - gg0)])
+
+    sol = least_squares(penalized_residuals_v2, gg0,
+                        method='lm', max_nfev=10_000,
+                        ftol=1e-10, xtol=1e-10)
+
+    gg_hat    = sol.x
+    converged = bool(sol.status > 0)
+
+    # ------------------------------------------------------------------
+    # Step 3: Recover (beta0, beta1, phi) and compute ATT
+    # ------------------------------------------------------------------
+    g0_h, g1_h = gg_hat
+    eb_hat = _clip_ps(norm.cdf(g0_h + g1_h * X))
+    b0_h, b1_h, phi_h = _beta_phi_from_linear(eb_hat[ctrl])
+
+    m0_hat  = b0_h + b1_h * logX + phi_h / (1.0 - eb_hat)
+    tau_att = float(np.mean((Y - m0_hat)[D == 1]))
+
+    # Compute condition number of the 3x3 system at the solution
+    h_final = 1.0 / (1.0 - eb_hat[ctrl])
+    Z_final = np.column_stack([np.ones(ctrl.sum()), logX_ctrl, odds_a_ctrl])
+    W_final = np.column_stack([np.ones(ctrl.sum()), logX_ctrl, h_final])
+    A_final = Z_final.T @ W_final
+    cond = float(np.linalg.cond(A_final))
+
+    return {
+        'tau_att': tau_att,
+        'beta': (b0_h, b1_h),
+        'phi': phi_h,
+        'alpha': (a0_hat, a1_hat),
+        'gamma': (g0_h, g1_h),
+        'm0_hat': m0_hat,
+        'converged': converged,
+        'oracle_alpha': use_oracle_alpha,
+        'cond_number': cond,
+    }
