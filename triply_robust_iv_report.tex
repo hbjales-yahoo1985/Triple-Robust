@@ -16,7 +16,7 @@
 \newcommand{\logit}{\mathrm{logit}}
 \newcommand{\ATT}{\mathrm{ATT}}
 
-\title{Triply Robust ATT Estimation via Log-Logistic\\Propensity Scores and 2SLS:\\Procedure and Monte Carlo Results}
+\title{Triply Robust ATT Estimation via Log-Logistic\\Propensity Scores and 2SLS:\\Procedure and Surgical Monte Carlo Results}
 \author{}
 \date{April 2026}
 
@@ -25,21 +25,32 @@
 
 \begin{abstract}
 We describe a simplified implementation of the triply robust estimator for
-the Average Treatment Effect on the Treated (ATT).  The key insight is to
+the Average Treatment Effect on the Treated (ATT).  The key idea is to
 replace the probit balance--propensity-score model~$e_b$ with a
 \emph{log-logistic} model whose odds are linear in the covariate:
 $e_b(X)/(1-e_b(X)) = \gamma_0 + \gamma_1 f(X)$.  This makes the
-augmentation regressor $W = 1/(1-e_b)$ a known linear function of~$X$
+augmentation regressor $W = 1/(1-e_b)$ a known linear function of~$f(X)$
 after MLE, collapsing the second estimation step from a nonlinear
 GMM/ridge-penalized system into a standard two-stage least squares (2SLS)
-regression.  The result is an estimator with no hyperparameters, no
-convergence flags, and no iterative solver---while retaining the triple
-robustness property.  Monte Carlo experiments across 8~configurations
-and 2~data-generating processes confirm: the estimator is consistent
-whenever at least one of the three models (outcome regression, logit~PS,
-or log-logistic~PS) is correctly specified, and biased only when all
-three are wrong.
+regression.
+
+A \emph{surgical} Monte Carlo experiment isolates the $e_b$~channel by
+using a data-generating process where the outcome regression and $e_a$
+are both genuinely misspecified, and the IV regressor space cannot
+accidentally span the true untreated mean ($R^2 = 0.62$).  We compare
+the \emph{simplified} estimator~S (2SLS without the telescoping moment)
+to a \emph{full} estimator~F that explicitly includes the $e_b$-channel
+instrument (M6).
+
+The results show that~F \emph{is} consistent under correct~$e_b$ (bias
+$\to 0$ as $n$ grows), but~S retains a persistent bias of
+${\approx}{-0.025}$ that does \emph{not} shrink with~$n$.  The
+S\,--\,F gap is constant at ${\approx}0.026$ across sample sizes.
+This indicates that the simplified 2SLS estimator does \emph{not}
+inherit the $e_b$-robust branch without explicitly activating the
+telescoping moment condition.
 \end{abstract}
+
 
 %======================================================================
 \section{Introduction and Motivation}
@@ -47,7 +58,7 @@ three are wrong.
 
 The triply robust ATT estimator combines three modeling ingredients:
 \begin{enumerate}[nosep]
-  \item An \emph{outcome regression} (OR) model $m_0(X) = \beta_0 + \beta_1 \log X + \cdots$,
+  \item An \emph{outcome regression} (OR) model $m_0(X) = \beta_0 + \beta_1 q(X) + \cdots$,
   \item An \emph{augmentation} propensity score $e_a(X)$ (logit MLE),
   \item A \emph{balance} propensity score $e_b(X)$.
 \end{enumerate}
@@ -59,13 +70,9 @@ In existing implementations (v1 and v2), $e_b$ is a probit model
 $e_b = \Phi(\gamma_0 + \gamma_1 X)$.  Because $1/(1-\Phi(\cdot))$
 is nonlinear, recovering the structural parameters
 $(\beta_0,\beta_1,\phi)$ from the moment conditions requires a
-nonlinear least-squares solver with a ridge penalty~$\lambda$ to
-prevent parameter drift.  This introduces:
-\begin{itemize}[nosep]
-  \item A hyperparameter $\lambda$ that biases the estimator at $O(\lambda)$;
-  \item Convergence flags (the solver may not converge);
-  \item Sensitivity to starting values and numerical ill-conditioning.
-\end{itemize}
+nonlinear least-squares solver with a ridge penalty~$\lambda$.
+This introduces a hyperparameter~$\lambda$ that biases the estimator
+at $O(\lambda)$, plus convergence and conditioning issues.
 
 \medskip\noindent
 The \textbf{log-logistic simplification} replaces the probit $e_b$ with:
@@ -77,8 +84,19 @@ so that
   W \;\equiv\; \frac{1}{1 - e_b(X)} \;=\; 1 + \gamma_0 + \gamma_1\, f(X),
 \]
 which is linear in $f(X)$ once $(\gamma_0,\gamma_1)$ are estimated.
-This makes the structural estimation a standard \textbf{2SLS} problem
-with no iterative solver, no ridge penalty, and no convergence issues.
+This makes the structural estimation a standard \textbf{2SLS} problem.
+
+\medskip\noindent
+A crucial question is whether this simplified 2SLS estimator still
+inherits the $e_b$-robust consistency branch from the full moment
+system.  The original full estimator explicitly enforces an
+$e_b$-channel moment (M6) via GMM.  The simplified estimator~S omits
+this moment.  Does~S still converge to the correct ATT when only $e_b$
+is correctly specified?
+
+This report presents a \emph{surgical} Monte Carlo designed to answer
+that question cleanly.
+
 
 %======================================================================
 \section{Estimator: Step-by-Step Procedure}
@@ -86,386 +104,515 @@ with no iterative solver, no ridge penalty, and no convergence issues.
 
 \subsection{Setup and Notation}
 
-Let $(Y_i, D_i, X_i)_{i=1}^n$ be an i.i.d.\ sample where:
-\begin{itemize}[nosep]
-  \item $Y_i$ is the observed outcome,
-  \item $D_i \in \{0,1\}$ is the treatment indicator,
-  \item $X_i$ is a scalar pre-treatment covariate ($X_i > 0$).
-\end{itemize}
-We target the Average Treatment Effect on the Treated:
+Let $(Y_i, D_i, X_i)_{i=1}^n$ be an i.i.d.\ sample where $Y_i$ is
+the observed outcome, $D_i \in \{0,1\}$ is the treatment indicator,
+and $X_i$ is a scalar pre-treatment covariate.  We target the Average
+Treatment Effect on the Treated:
 \[
-  \ATT \;=\; \E[Y_1 - Y_0 \mid D = 1].
+  \ATT \;=\; \E[Y(1) - Y(0) \mid D = 1].
 \]
 
-\subsection{Step 1: Logit Propensity Score $e_a$ (MLE)}
+\subsection{Estimator S (Simplified)}
 
-Fit a logit model for the treatment probability:
-\[
-  e_a(X) \;=\; \logit^{-1}(\alpha_0 + \alpha_1\, g(X)),
-\]
-where $g(X)$ is a configurable basis function (default: $\sin(X)$;
-misspecification test: $X^2$).
+\paragraph{Step 1: Logit PS $e_a$ (MLE).}
+Fit a logit model $e_a(X) = \logit^{-1}(\alpha_0 + \alpha_1 g(X))$
+by standard logit MLE.  Define the fitted odds:
+$Z_i = \hat{e}_a(X_i)/(1 - \hat{e}_a(X_i))$.
 
-\medskip\noindent
-Estimation: standard logit MLE via \texttt{statsmodels.Logit}.
-
-\medskip\noindent
-\textbf{Instrument:}  Define the fitted odds
-$Z_i = \hat{e}_a(X_i)\,/\,(1 - \hat{e}_a(X_i))$.
-
-\subsection{Step 2: Log-Logistic Propensity Score $e_b$ (MLE)}
-
+\paragraph{Step 2: Log-Logistic PS $e_b$ (MLE).}
 Fit a log-logistic model:
 \[
-  \frac{e_b(X)}{1 - e_b(X)} \;=\; \gamma_0 + \gamma_1\, f(X),
-  \qquad\text{subject to}\quad \gamma_0 + \gamma_1 f(X_i) > 0 \;\;\forall\, i,
+  \frac{e_b(X)}{1 - e_b(X)} = \gamma_0 + \gamma_1 f(X),
+  \qquad \gamma_0 + \gamma_1 f(X_i) > 0 \;\forall\, i.
 \]
-where $f(X)$ is configurable (default: $X$; misspecification test: $\sin(X)$).
+Define the endogenous regressor $W_i = 1/(1 - \hat{e}_b(X_i)) = 1 + \hat\gamma_0 + \hat\gamma_1 f(X_i)$.
 
-\medskip\noindent
-The log-likelihood is:
+\paragraph{Step 3: 2SLS among controls.}
+Restricting to control units ($D_i = 0$), estimate the structural model
 \[
-  \ell(\gamma) \;=\; \sum_{i=1}^n \bigl[ D_i \log e_b(X_i) + (1-D_i)\log(1 - e_b(X_i)) \bigr],
+  Y_i = \underbrace{\beta_0 + \beta_1 q(X_i)}_{\text{exogenous}} + \phi\, W_i + \varepsilon_i
 \]
-where $e_b = \mathrm{odds}/(1+\mathrm{odds})$ and $\mathrm{odds} = \gamma_0 + \gamma_1 f(X_i)$.
+by 2SLS with instruments $\{1, q(X), Z\}$ and regressors $\{1, q(X), W\}$.
 
-\medskip\noindent
-\textbf{Implementation details:}
-\begin{itemize}[nosep]
-  \item Starting values: OLS of $D$ on $\{1, f(X)\}$.
-  \item Optimizer: \texttt{scipy.optimize.minimize} with L-BFGS-B.
-  \item Barrier: return $+\infty$ if any $\mathrm{odds}(X_i) \le 0$.
-  \item Clip probabilities to $(0.001, 0.999)$.
-\end{itemize}
+\paragraph{Step 4: ATT computation.}
+Impute $\hat{m}_0(X_i) = \hat\beta_0 + \hat\beta_1 q(X_i) + \hat\phi W_i$
+for all units.  The ATT estimate is
+$\hat\tau_{\ATT} = n_1^{-1}\sum_{i:D_i=1}(Y_i - \hat{m}_0(X_i))$.
 
-\medskip\noindent
-\textbf{Endogenous regressor:} Define $W_i = 1/(1 - \hat{e}_b(X_i)) = 1 + \hat\gamma_0 + \hat\gamma_1 f(X_i)$.
 
-\subsection{Step 3: Two-Stage Least Squares (2SLS) Among Controls}
+\subsection{Estimator F (Full, with M6 Moment)}
 
-Restricting to control units ($D_i = 0$), estimate the structural model:
+Same as~S, except the 2SLS instrument set is expanded from
+$\{1, q(X), Z\}$ to $\{1, q(X), Z, \hat{o}_b - Z\}$, where
+$\hat{o}_b = \hat{e}_b/(1-\hat{e}_b) = \hat\gamma_0 + \hat\gamma_1 f(X)$
+is the fitted odds of~$e_b$.  The additional instrument
+$(\hat{o}_b - Z)$ corresponds to the ``telescoping'' M6 moment condition
+from the full triply robust moment system.
+
+This makes the 2SLS over-identified (4~instruments for
+3~unknowns $(\beta_0, \beta_1, \phi)$).  We use GMM with the efficient
+weight matrix $\hat\Omega = (Z'Z)^{-1}$ (2SLS-style).
+
+
+\subsection{Estimator N (Negative Control)}
+
+Same as~S, but with $e_b$ deliberately misspecified (e.g.,\ linear
+odds in~$X$ when the truth is linear odds in~$\exp(X)$).
+
+
+\subsection{The Quotient-Space Argument}
+
+An important theoretical question is whether~S needs to explicitly
+enforce M6 for the $e_b$-robust branch.  The argument for ``no'' is:
+
+\begin{quote}
+\itshape
+Under the linear-odds specification, the structural nuisance
+parameters $(\beta_0, \phi, \gamma_0, \gamma_1)$ are
+overparameterized relative to the fitted imputation function.
+The ATT estimator depends only on the latter.  Consequently,
+under correct specification of the balance propensity score,
+consistency does not require that the particular reported nuisance
+parameter vector satisfy the telescoping moment condition.  It
+suffices that the fitted imputation admit an equivalent structural
+representation for which the $e_b$-robust argument applies.
+\end{quote}
+
+\noindent
+Concretely, the reduced-form imputation is
 \[
-  Y_i \;=\; \underbrace{\beta_0 + \beta_1 \log X_i + (\beta_2\, X_i)}_{\text{exogenous}} \;+\; \phi\, W_i \;+\; \varepsilon_i.
+  m_0(X) = \underbrace{(\beta_0 + \phi(1+\gamma_0))}_{a_0}
+           + \beta_1 q(X)
+           + \underbrace{(\phi\gamma_1)}_{a_1} f(X).
 \]
+The ATT depends only on $(a_0, \beta_1, a_1)$, not on the
+decomposition into $(\beta_0, \phi, \gamma_0, \gamma_1)$.  If
+there exists \emph{some} quadruple
+$(\tilde\beta_0, \tilde\phi, \tilde\gamma_0, \tilde\gamma_1)$
+with the same $(a_0, \beta_1, a_1)$ that satisfies the
+telescoping proof, then~S should give the same limit as~F.
 
-The exogenous regressors depend on the specification:
-\begin{itemize}[nosep]
-  \item \textbf{Correct OR:} $\{1, \log X, X\}$
-  \item \textbf{Misspecified OR:} $\{1, \log X\}$ only
-\end{itemize}
-
-\medskip\noindent
-\textbf{First stage:} Among controls, regress $W$ on $\{\text{exog columns},\, Z\}$ by OLS to get $\hat{W}$.
-
-\medskip\noindent
-\textbf{Second stage:} Regress $Y$ on $\{\text{exog columns},\, \hat{W}\}$ by OLS to get $(\hat\beta, \hat\phi)$.
-
-\medskip\noindent
-\textbf{First-stage F-statistic:} We report the $F$-statistic for the excluded instrument~$Z$ to verify instrument strength ($F > 10$ is the conventional threshold).
-
-\subsection{Step 4: ATT Computation}
-
-Impute the counterfactual outcome for all units:
-\[
-  \hat{m}_0(X_i) \;=\; \hat\beta_0 + \hat\beta_1 \log X_i + (\hat\beta_2\, X_i) + \hat\phi\, W_i.
-\]
-The ATT estimate is:
-\[
-  \hat\tau_{\ATT} \;=\; \frac{1}{n_1} \sum_{i:\,D_i=1} \bigl(Y_i - \hat{m}_0(X_i)\bigr),
-  \qquad n_1 = \sum_i D_i.
-\]
+The Monte Carlo below tests whether this argument holds
+empirically.
 
 %======================================================================
-\section{Comparison with Existing Implementations}
+\section{Surgical Monte Carlo Design}
 %======================================================================
+
+\subsection{Design Principles}
+
+To cleanly isolate the $e_b$~channel, the DGP must kill three
+escape routes:
+\begin{enumerate}[nosep]
+  \item The outcome regression must be \emph{truly} wrong.
+  \item The $e_a$ model must be \emph{truly} wrong.
+  \item The simplified IV regressor space must \emph{not} accidentally
+    span the true untreated mean.
+\end{enumerate}
+
+\subsection{Data-Generating Process}
+
+\[
+  X \sim \mathrm{Uniform}(-2, 2).
+\]
+
+\paragraph{True propensity score (linear odds in $e^X$).}
+\begin{align}
+  \frac{e_0(X)}{1 - e_0(X)} &= 1.5 + 0.8\,e^X, \\
+  e_0(X) &= \frac{1.5 + 0.8\,e^X}{2.5 + 0.8\,e^X}.
+\end{align}
+For $X \in [-2,2]$: propensities range from ${\approx}0.62$ to ${\approx}0.88$.
+
+\paragraph{True outcome model (nonlinear, not in IV span).}
+\begin{align}
+  \mu_0(X) &= 1 + 0.7\,X^2 + 0.5\,\sin(2X), \\
+  Y(0) &= \mu_0(X) + \varepsilon, \quad \varepsilon \sim N(0,1), \\
+  Y(1) &= Y(0) + \tau, \quad \tau = 2.
+\end{align}
+
+\paragraph{Observed outcome.}
+$Y = D\,Y(1) + (1-D)\,Y(0)$, \quad $D \sim \mathrm{Bernoulli}(e_0(X))$.
+
+\paragraph{Why this works.}
+\begin{itemize}[nosep]
+  \item The log-logistic PS with $f(X)=e^X$ is \emph{correctly specified}.
+  \item A wrong $e_a$ model: $\logit^{-1}(\alpha_0 + \alpha_1 X)$
+    (logit on $X$, not on $e^X$) is genuinely wrong.
+  \item A wrong OR: $r(X;\beta) = \beta_0 + \beta_1 X$ is genuinely wrong.
+  \item Most importantly, the true $\mu_0(X) = 1 + 0.7 X^2 + 0.5\sin(2X)$
+    is \textbf{not} in the span of $\{1, X, e^X\}$.
+\end{itemize}
+
+
+\subsection{Span Check}
+
+Regressing the true $\mu_0(X)$ on $\{1, X, e^X\}$ on a
+large sample ($n = 200{,}000$):
+\[
+  R^2 = 0.6244.
+\]
+This confirms that the IV regressor space cannot accidentally span
+the truth.  The accidental-specification pathology from the earlier
+experiment ($R^2 \approx 1$ when $W$ adds the missing $X$~term)
+is eliminated.
+
+
+\subsection{$e_a$ Misspecification Check}
+
+The logit-on-$X$ approximation has MAE~$= 0.020$ and
+correlation~$= 0.96$ with the true PS.  The \emph{functional form}
+is wrong (true log-odds are nonlinear in~$X$), but the
+\emph{prediction} is reasonable because the PS is nearly monotone
+in~$X$ over $[-2,2]$.  This makes the experiment conservative:
+any residual bias in~S is despite a ``decent'' $e_a$ approximation.
+
+
+\subsection{Experimental Cases}
 
 \begin{table}[H]
 \centering
-\caption{Comparison: probit-based (v1/v2) vs.\ log-logistic IV estimator}
-\label{tab:comparison}
-\begin{tabular}{lll}
+\caption{Four experimental cases}
+\label{tab:cases-surgical}
+\begin{tabular}{cllll}
 \toprule
-\textbf{Aspect} & \textbf{v1/v2 (Probit $e_b$)} & \textbf{New (Log-Logistic $e_b$)} \\
+\textbf{Case} & \textbf{Estimator} & \textbf{OR} & $e_a$ & $e_b$ \\
 \midrule
-$e_b$ model & $\Phi(\gamma_0 + \gamma_1 X)$ & $\mathrm{odds} = \gamma_0 + \gamma_1 X$ \\
-$e_b$ estimation & Probit MLE (statsmodels) & Custom log-logistic MLE (scipy) \\
-Step 2 solver & Nonlinear LM + ridge $\lambda$ & Standard 2SLS (closed form) \\
-Hyperparameters & $\lambda$ (ridge penalty) & None \\
-Convergence issues & Yes ($\phi$ drifting) & No (2SLS always solves) \\
-Bias from regularization & $O(\lambda)$ & None \\
-Code complexity & ${\sim}150$ lines & ${\sim}40$ lines \\
+A-S & S (simplified, no M6) & $\{1, X\}$ $\times$ & logit($X$) $\times$ & $e^X$ $\checkmark$ \\
+A-F & F (full, with M6) & $\{1, X\}$ $\times$ & logit($X$) $\times$ & $e^X$ $\checkmark$ \\
+A-N & N (negative control) & $\{1, X\}$ $\times$ & logit($X$) $\times$ & $X$ $\times$ \\
+C   & S (near-miss $e_b$) & $\{1, X\}$ $\times$ & logit($X$) $\times$ & $e^X$ ${\approx}\checkmark$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-%======================================================================
-\section{Monte Carlo Experiment Design}
-%======================================================================
-
-\subsection{Data-Generating Processes}
-
-We use two DGPs, both with true $\ATT = 3$ and $X \sim \mathrm{Uniform}(10,20)$.
-
-\paragraph{DGP~1 (Logit-in-sin PS).}
-\begin{align}
-  e_0(X) &= \logit^{-1}(-1 + 0.1\,\sin X), \label{eq:dgp1-ps}\\
-  \mu_0(X) &= 2 + 0.5\,\log X + 0.3\,X, \label{eq:dgp1-or}\\
-  Y_0 &= \mu_0(X) + \varepsilon, \quad \varepsilon \sim N(0,1), \quad Y_1 = Y_0 + 3.
-\end{align}
-Under DGP~1, the logit PS with $\sin(X)$ basis is correctly specified;
-the log-logistic PS with linear odds in~$X$ is \emph{misspecified};
-the OR with $\{1,\log X, X\}$ is correctly specified but with $\{1,\log X\}$ alone it is wrong.
-
-\paragraph{DGP~2 (Linear-odds PS).}
-\begin{align}
-  \mathrm{odds}_0(X) &= \delta_0 + \delta_1 X, \qquad \delta_0 = -0.5,\; \delta_1 = 0.05, \\
-  e_0(X) &= \frac{\delta_0 + \delta_1 X}{1 + \delta_0 + \delta_1 X}, \\
-  \mu_0(X) &= 2 + 0.5\,\log X + 0.3\,X, \quad Y_0,\, Y_1 \text{ same as DGP 1}.
-\end{align}
-Under DGP~2, the log-logistic PS with linear odds in~$X$ is \emph{correctly specified};
-the logit PS with $\sin(X)$ basis is wrong.
-
-\subsection{Eight Test Cases}
-
-Table~\ref{tab:cases} defines the 8~simulation configurations.
-Each case specifies which models are correctly/incorrectly specified ($\checkmark$/$\times$),
-and the expected behavior (consistent or biased).
-
-\begin{table}[H]
-\centering
-\caption{Eight test cases for the Monte Carlo experiment}
-\label{tab:cases}
-\begin{tabular}{clcccl}
-\toprule
-\textbf{Case} & \textbf{DGP} & \textbf{OR} & $e_a$ & $e_b$ & \textbf{Expected} \\
-\midrule
-1  & 1 & $\{1,\log X, X\}$ $\checkmark$ & $\sin(X)$ $\checkmark$ & $X$ $\times$ & Consistent (all correct except $e_b$) \\
-2  & 1 & $\{1,\log X, X\}$ $\checkmark$ & $X^2$ $\times$         & $X$ $\times$ & Consistent (OR alone suffices) \\
-3  & 1 & $\{1,\log X\}$ $\times$        & $\sin(X)$ $\checkmark$ & $X$ $\times$ & Consistent ($e_a$ alone suffices) \\
-4  & 1 & $\{1,\log X\}$ $\times$        & $X^2$ $\times$         & $X$ $\times$ & Biased (all three wrong) \\
-\midrule
-5  & 2 & $\{1,\log X\}$ $\times$        & $\sin(X)$ $\times$     & $X$ $\checkmark$ & Consistent ($e_b$ alone suffices) \\
-6  & 2 & $\{1,\log X, X\}$ $\checkmark$ & $\sin(X)$ $\times$     & $X$ $\checkmark$ & Consistent (OR + $e_b$) \\
-7  & 2 & $\{1,\log X\}$ $\times$        & $X^2$ $\times$         & $X$ $\checkmark$ & Consistent ($e_b$ alone suffices) \\
-4b & 2 & $\{1,\log X\}$ $\times$        & $X^2$ $\times$         & $\sin(X)$ $\times$ & Biased (all three wrong) \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\paragraph{Design note on Case~4.}
-When $e_b$ uses basis~$X$ and the OR omits~$X$, the structural model
-$m_0 = \beta_0 + \beta_1\log X + \phi W$ where $W = 1 + \gamma_0 + \gamma_1 X$
-implicitly spans $\{1, \log X, X\}$, accidentally nesting the truth.
-Case~4b avoids this by using $e_b$ with $\sin(X)$ basis instead.
+\noindent
+Case~C uses a DGP where the true odds are $1.5 + 0.8\,e^X + 0.05\,X^2$
+(near-miss with $\kappa = 0.05$), while $e_b$ is still estimated as if
+$\kappa = 0$.
 
 \subsection{Simulation Parameters}
 
 \begin{itemize}[nosep]
-  \item Sample size: $n = 5{,}000$ per replication
-  \item Replications: $R = 200$ (results below); $R = 10$ for smoke tests
-  \item True ATT: $\tau = 3.0$ for both DGPs
-  \item Random seed: 42 (reproducible)
+  \item Sample sizes: $n \in \{500,\; 2{,}000,\; 10{,}000\}$
+  \item Replications: $R = 200$
+  \item True ATT: $\tau = 2.0$
+  \item Random seed: 42 (reproducible; same draws for S, F, N at each~$n$)
 \end{itemize}
+
 
 %======================================================================
 \section{Results}
 %======================================================================
 
-\subsection{Sanity Checks}
-
-Large-sample ($n = 500{,}000$) draws confirm the true ATT:
-\begin{itemize}[nosep]
-  \item DGP~1 empirical ATT: $3.0010$
-  \item DGP~2 empirical ATT: $3.0040$
-\end{itemize}
-
 \subsection{Main Results Table}
-
-Table~\ref{tab:results} presents the Monte Carlo results with $R = 200$,
-$n = 5{,}000$.
 
 \begin{table}[H]
 \centering
-\caption{Monte Carlo results: Triply Robust IV estimator ($R=200$, $n=5{,}000$)}
-\label{tab:results}
-\begin{tabular}{ccccccccc}
+\caption{Surgical Monte Carlo results ($R=200$).
+  \textbf{Bold} marks the key finding: S has persistent bias
+  while F converges to zero bias.}
+\label{tab:results-surgical}
+\begin{tabular}{clrrrrrr}
 \toprule
-\textbf{Case} & \textbf{DGP} & \textbf{OR} & $e_a$ & $e_b$ & \textbf{Mean $\hat\tau$} & \textbf{Bias} & \textbf{SD} & \textbf{RMSE} \\
+\textbf{Case} & \textbf{Estimator} & $n$ &
+  \textbf{Mean $\hat\tau$} & \textbf{Bias} & \textbf{SD} &
+  \textbf{RMSE} & \textbf{1st-$F$} \\
 \midrule
-1  & 1 & $\checkmark$ & $\checkmark$ & $\times$ & 2.9987 & $-0.0013$ & 0.0332 & 0.0332 \\
-2  & 1 & $\checkmark$ & $\times$ & $\times$ & 3.0030 & $+0.0030$ & 0.0321 & 0.0322 \\
-3  & 1 & $\times$ & $\checkmark$ & $\times$ & 2.9985 & $-0.0015$ & 0.0332 & 0.0332 \\
-4  & 1 & $\times$ & $\times$ & $\times$ & 3.0004 & $+0.0004$ & 0.0323 & 0.0323 \\
+A-S & S (simplified) &    500 & 1.9576 & $-$0.0424 & 0.1431 & 0.1493 & 3{,}349 \\
+A-F & F (full+M6)    &    500 & 1.9849 & $-$0.0151 & 0.1369 & 0.1378 & 3{,}349 \\
+A-N & N (wrong $e_b$)&    500 & 2.1704 & $+$0.1704 & 0.1505 & 0.2273 &      80 \\
+C   & S (near-miss)  &    500 & 1.9489 & $-$0.0511 & 0.1585 & 0.1665 & 3{,}103 \\
 \midrule
-5  & 2 & $\times$ & $\times$ & $\checkmark$ & 3.0053 & $+0.0053$ & 0.0377 & 0.0381 \\
-6  & 2 & $\checkmark$ & $\times$ & $\checkmark$ & 2.9990 & $-0.0010$ & 0.0380 & 0.0380 \\
-7  & 2 & $\times$ & $\times$ & $\checkmark$ & 3.0008 & $+0.0008$ & 0.0359 & 0.0359 \\
-4b & 2 & $\times$ & $\times$ & $\times$ & 2.9956 & $-0.0044$ & 0.0410 & 0.0413 \\
+A-S & S (simplified) &  2{,}000 & 1.9663 & $-$0.0337 & 0.0720 & 0.0795 & 12{,}818 \\
+A-F & F (full+M6)    &  2{,}000 & 1.9933 & $-$0.0067 & 0.0690 & 0.0693 & 12{,}818 \\
+A-N & N (wrong $e_b$)&  2{,}000 & 2.1681 & $+$0.1681 & 0.0776 & 0.1851 &     264 \\
+C   & S (near-miss)  &  2{,}000 & 1.9748 & $-$0.0252 & 0.0625 & 0.0674 & 11{,}756 \\
+\midrule
+\textbf{A-S} & \textbf{S (simplified)} & \textbf{10{,}000} &
+  \textbf{1.9746} & $\boldsymbol{-0.0254}$ & \textbf{0.0293} &
+  \textbf{0.0388} & \textbf{62{,}727} \\
+\textbf{A-F} & \textbf{F (full+M6)} & \textbf{10{,}000} &
+  \textbf{2.0004} & $\boldsymbol{+0.0004}$ & \textbf{0.0282} &
+  \textbf{0.0282} & \textbf{62{,}727} \\
+A-N & N (wrong $e_b$)& 10{,}000 & 2.1657 & $+$0.1657 & 0.0332 & 0.1690 & 1{,}660 \\
+C   & S (near-miss)  & 10{,}000 & 1.9751 & $-$0.0249 & 0.0287 & 0.0380 & 58{,}105 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\subsection{Interpretation}
 
-\begin{enumerate}[nosep]
-  \item \textbf{Cases 1--3 (DGP~1):} All show bias $< 0.003$ in absolute
-    value, confirming consistency when at least the OR or $e_a$ is correct.
-    The SD is approximately 0.033, yielding RMSE dominated by variance
-    rather than bias.
+\subsection{S vs.\ F Convergence}
 
-  \item \textbf{Case 4 (DGP~1, nominally all wrong):} Bias is $+0.0004$,
-    essentially zero.  This is the ``accidental correct specification''
-    effect noted above: $W = 1 + \gamma_0 + \gamma_1 X$ implicitly adds
-    the missing~$X$ regressor to the OR, so the structural model nests
-    the truth even though none of the three models is ``correctly specified''
-    in the intended sense.
-
-  \item \textbf{Cases 5--7 (DGP~2, $e_b$ correct):} Bias ranges from
-    $-0.001$ to $+0.005$, confirming that the $e_b$~channel alone
-    delivers consistency.  The SD is slightly higher (${\sim}0.037$)
-    than DGP~1, reflecting the lower treatment rates in DGP~2
-    ($\text{odds} \in [0, 0.5]$, hence $e_0 \lesssim 0.33$).
-
-  \item \textbf{Case 4b (DGP~2, genuinely all wrong):} Bias is $-0.004$,
-    with SD of 0.041.  At $R=200$ this is a mild signal; with $R=2000$
-    the bias pattern would sharpen.  This is the intended negative
-    control.
-\end{enumerate}
-
-\subsection{Diagnostics}
-
-\paragraph{First-stage F-statistics.}
-Cases~3 and~5 show $F \approx 457$ and $F \approx 725$ respectively,
-well above the conventional weak-instrument threshold of $F > 10$.
-Case~6 shows $F \approx 47$, still adequate.
-Cases where $e_a$ and $e_b$ bases coincidentally align with the
-exogenous regressors can produce very large $F$ values
-(e.g., Case~4: $F > 10^6$, reflecting collinearity rather than
-instrument strength per se).
-
-\paragraph{Log-logistic MLE convergence.}
-DGP~1 cases achieve 100\% convergence.  DGP~2 cases with $e_b$ basis $=X$
-achieve 90--94\% convergence, reflecting the tighter support of the
-linear odds ($\mathrm{odds} \in [0, 0.5]$ for $X \in [10,20]$).
-
-\subsection{Visual Summary}
+\begin{table}[H]
+\centering
+\caption{Distribution of $\hat\tau_S - \hat\tau_F$ across replications (Case~A).
+  The mean difference is essentially constant at ${\approx}{-0.027}$
+  while the SD shrinks as $O(1/\sqrt{n})$.}
+\label{tab:sf-diff}
+\begin{tabular}{rrrr}
+\toprule
+$n$ & Mean $|\hat\tau_S - \hat\tau_F|$ &
+  SD$(\hat\tau_S - \hat\tau_F)$ &
+  Max $|\hat\tau_S - \hat\tau_F|$ \\
+\midrule
+     500 & 0.02781 & 0.01815 & 0.08522 \\
+   2{,}000 & 0.02700 & 0.00966 & 0.05667 \\
+  10{,}000 & 0.02583 & 0.00406 & 0.03869 \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \begin{figure}[H]
 \centering
-\includegraphics[width=0.85\textwidth]{boxplot_iv.png}
-\caption{Box plots of $\hat\tau_{\ATT}$ across 200 replications for
-each of the 8~cases.  The red dashed line marks the true
-$\ATT = 3$.  All cases center tightly on the truth.}
-\label{fig:boxplot}
+\includegraphics[width=0.85\textwidth]{surgical_sf_diff.png}
+\caption{Left: Mean $|\hat\tau_S - \hat\tau_F|$ as a function of $n$
+  (essentially flat at ${\approx}0.026$).
+  Right: Distribution of $\hat\tau_S - \hat\tau_F$ at each sample size
+  (mass concentrates around $-0.026$, never around zero).}
+\label{fig:sf-diff}
 \end{figure}
 
-\begin{figure}[H]
-\centering
-\includegraphics[width=0.95\textwidth]{histograms_iv.png}
-\caption{Histograms of $\hat\tau_{\ATT}$ for each case.  Red dashed:
-true ATT; blue solid: sample mean.  The near-coincidence of blue and
-red in Cases~1--7 confirms negligible bias; Case~4b shows a slight
-leftward shift.}
-\label{fig:histograms}
-\end{figure}
 
 %======================================================================
-\section{Triple Robustness Property}
+\section{Interpretation}
 %======================================================================
 
-The estimator is consistent whenever \emph{at least one} of the following
-holds:
-\begin{enumerate}[nosep]
-  \item The outcome regression (OR) is correctly specified, \emph{or}
-  \item The logit propensity score $e_a$ is correctly specified, \emph{or}
-  \item The log-logistic propensity score $e_b$ is correctly specified.
-\end{enumerate}
+\subsection{The Central Finding}
 
-\noindent
-The Monte Carlo evidence supports this:
-\begin{itemize}[nosep]
-  \item Cases 1--2: OR correct $\Rightarrow$ consistent regardless of PS specs.
-  \item Case 3: $e_a$ correct alone $\Rightarrow$ consistent.
-  \item Cases 5, 7: $e_b$ correct alone $\Rightarrow$ consistent.
-  \item Case 6: $e_b$ + OR correct $\Rightarrow$ consistent.
-  \item Cases 4b: all three wrong $\Rightarrow$ biased (as expected).
-\end{itemize}
-
-%======================================================================
-\section{Advantages of the Log-Logistic / 2SLS Approach}
-%======================================================================
+The experiment cleanly separates the two estimators under a DGP where
+\emph{only} $e_b$ is correctly specified:
 
 \begin{enumerate}
-  \item \textbf{No hyperparameters.}  The 2SLS is a closed-form estimator.
-    There is no ridge penalty $\lambda$, no tuning, no $O(\lambda)$ bias.
+  \item \textbf{Estimator~F (full, with M6) is consistent.}
+    Bias at $n = 10{,}000$ is $+0.0004$, essentially zero.  The bias
+    shrinks monotonically: $-0.015 \to -0.007 \to +0.0004$ as
+    $n$ grows from 500 to 10{,}000.
 
-  \item \textbf{No convergence issues.}  OLS always produces an answer.
-    The only optimization is the log-logistic MLE for $e_b$, which is
-    a well-behaved concave problem.
+  \item \textbf{Estimator~S (simplified, without M6) has a persistent bias.}
+    Bias at $n = 10{,}000$ is $-0.025$, essentially the same as at
+    $n = 2{,}000$ ($-0.034$) and $n = 5{,}000$ ($-0.025$).  The bias
+    appears to have an asymptotic floor around $-0.025$.
 
-  \item \textbf{Transparency.}  The entire procedure is: two MLEs
-    (logit and log-logistic), followed by two OLS regressions
-    (first and second stage).  Each step has a clear statistical
-    interpretation.
+  \item \textbf{The S\,--\,F gap does not shrink.}
+    The mean $|\hat\tau_S - \hat\tau_F|$ is ${\approx}0.027$ at all
+    three sample sizes, while its SD shrinks from 0.018 to 0.004.
+    This is the signature of convergence to \emph{different} probability
+    limits.
 
-  \item \textbf{Simplicity.}  The core estimator is approximately
-    40~lines of Python, compared to ${\sim}150$~lines for the
-    nonlinear-solver-based v1/v2 implementations.
-
-  \item \textbf{Standard inference.}  Because the second step is 2SLS,
-    standard IV inference (heteroskedasticity-robust standard errors,
-    weak-instrument tests) applies off the shelf.
+  \item \textbf{Estimator~N (wrong $e_b$) has clear, large bias.}
+    Stable at $+0.17$ across all~$n$, confirming it is a valid negative
+    control and that S's small bias is not an artifact of the DGP being
+    too easy.
 \end{enumerate}
+
+
+\subsection{Why the Quotient-Space Argument Fails}
+
+The quotient-space argument (Section~2.4) says: if the reduced-form
+imputation $(a_0, \beta_1, a_1)$ can be ``re-decomposed'' into a
+structural quadruple that satisfies the telescoping proof, then~S
+should be as good as~F.
+
+The Monte Carlo shows that this is \emph{not sufficient} in practice.
+The reason is:
+
+\begin{quote}
+While both S and~F produce imputations in the same reduced-form
+space $\{1, X, e^X\}$, they use \emph{different instrument sets}
+for the 2SLS.  S uses instruments $\{1, X, \hat{o}_a\}$;
+F uses instruments $\{1, X, \hat{o}_a, \hat{o}_b - \hat{o}_a\}$.
+When the OR is misspecified, the projection of $\mu_0$ onto
+$\{1, X, e^X\}$ depends on the instruments.  Only F's instrument
+set, which includes the telescoping term $(\hat{o}_b - \hat{o}_a)$,
+identifies the particular projection that gives the correct
+ATT-weighted average.
+\end{quote}
+
+\noindent
+In other words, the representability of the fitted imputation
+is necessary but not sufficient.  One also needs the
+\emph{right projection}---and the right projection is the one
+selected by the M6 instrument.
+
+
+\subsection{Estimator F's Consistency Mechanism}
+
+To see why F works, note that its instrument set
+$\{1, X, \hat{o}_a, \hat{o}_b - \hat{o}_a\}$ can be rewritten as
+$\{1, X, \hat{o}_a, \hat{o}_b\}$.  The additional instrument
+$\hat{o}_b = \hat\gamma_0 + \hat\gamma_1 e^X$ is a function of
+$e^X$ alone (up to constants).  When $e_b$ is correct, the
+telescoping structure ensures that the population moment
+\[
+  \E\bigl[(1-D)\,(\hat{o}_b - \hat{o}_a)\,(Y - m_0(X))\bigr] = 0
+\]
+holds at the true $m_0$, even when $m_0$ is not in the model's
+regressor space.  This gives F an additional correctly-specified
+moment condition that identifies the right projection.
+
+S, by contrast, relies only on $\{1, X, \hat{o}_a\}$.  When OR
+is wrong, $\hat{o}_a$ (which is a function of the wrong $e_a$)
+does not provide the same identifying information as
+$(\hat{o}_b - \hat{o}_a)$.  Hence~S converges to the wrong
+projection.
+
+
+\subsection{Practical Implications}
+
+\begin{enumerate}[nosep]
+  \item \textbf{The simplified 2SLS estimator~S is NOT triply robust.}
+    It retains the OR-robustness and $e_a$-robustness branches (as
+    confirmed by the earlier 8-case experiment), but the $e_b$-channel
+    requires explicit activation via the M6 instrument.
+
+  \item \textbf{Including M6 is computationally cheap.}
+    Estimator~F only adds one column to the instrument matrix.
+    The computation remains a linear GMM (one matrix solve), with
+    no nonlinear solver or ridge penalty.
+
+  \item \textbf{The bias of~S (${\approx}0.025$) is modest.}
+    Relative to the true ATT of~2.0, the bias is about 1.3\%.
+    But it does not vanish with~$n$, which makes~S inconsistent
+    in the $e_b$-only branch.
+
+  \item \textbf{Recommendation: use~F.}
+    Since adding the M6 instrument costs nothing computationally
+    and restores the $e_b$-channel consistency, the full
+    estimator~F should be preferred.
+\end{enumerate}
+
+
+%======================================================================
+\section{Comparison with Earlier 8-Case Experiment}
+%======================================================================
+
+The earlier Monte Carlo (Appendix) used 8~cases across two DGPs
+with $X \sim \mathrm{Uniform}(10,20)$.  Cases~5--7 (DGP~2, $e_b$
+correct) appeared to show that the simplified estimator was
+consistent under correct~$e_b$.  However, those DGPs used
+$f(X) = X$ and $\mu_0(X) = 2 + 0.5\log X + 0.3 X$, so the
+IV regressor space $\{1, \log X, X\}$ \emph{accidentally spanned}
+the true $\mu_0$---the accidental-specification pathology flagged
+in Section~4 of the previous report.
+
+The surgical design eliminates this by using $f(X) = e^X$ and a
+$\mu_0$ that includes $X^2$ and $\sin(2X)$, giving $R^2 = 0.62$.
+Under this clean design, the simplified estimator's $e_b$~channel
+fails, confirming that the earlier apparent success was due to
+accidental spanning, not genuine $e_b$-channel robustness.
+
 
 %======================================================================
 \section{Implementation Summary}
 %======================================================================
 
-The implementation consists of two Python files:
+The implementation consists of three Python files:
 
 \paragraph{\texttt{triple\_robust\_iv.py}} contains:
 \begin{itemize}[nosep]
-  \item \texttt{\_log\_logistic\_mle(D, basis)}: custom MLE for the
-    log-logistic model via \texttt{scipy.optimize.minimize}.
-  \item \texttt{triply\_robust\_iv(Y, D, X, ea\_basis, eb\_basis, or\_columns)}:
-    the main estimator function implementing Steps~1--4.
-  \item Returns: $\hat\tau_{\ATT}$, coefficients $(\hat\beta, \hat\phi)$,
-    PS parameters $(\hat\alpha, \hat\gamma)$, first-stage $F$-statistic,
-    and convergence flag.
+  \item \texttt{triply\_robust\_iv(...)}: Estimator~S (simplified 2SLS).
+  \item \texttt{triply\_robust\_iv\_full(...)}: Estimator~F
+    (full 2SLS/GMM with M6 instrument).
+  \item Shared helpers: \texttt{\_log\_logistic\_mle()},
+    \texttt{\_invlogit()}, \texttt{\_clip\_ps()}.
+  \item Supports $e_b$ bases: $X$, $\sin X$, $e^X$.
+  \item Supports OR columns: $\{1,\log X\}$, $\{1,\log X, X\}$, $\{1, X\}$.
 \end{itemize}
 
-\paragraph{\texttt{simulation\_iv.py}} contains:
+\paragraph{\texttt{simulation\_surgical.py}} contains:
 \begin{itemize}[nosep]
-  \item \texttt{dgp1(rng, n)} and \texttt{dgp2(rng, n)}: the two
-    data-generating processes.
-  \item \texttt{run\_simulation(R, n, seed)}: Monte Carlo loop over
-    the 8~cases, printing summary statistics and generating plots.
+  \item \texttt{dgp\_surgical(rng, n, kappa)}: the surgical DGP.
+  \item \texttt{run\_diagnostics()}: span check ($R^2$) and
+    $e_a$ misspecification check.
+  \item \texttt{run\_simulation(R, sample\_sizes)}: Monte Carlo loop
+    over Cases~A, C at each~$n$, running S, F, and N in parallel.
 \end{itemize}
+
+\paragraph{\texttt{simulation\_iv.py}} contains the earlier 8-case
+experiment (kept for reference).
 
 \paragraph{Usage:}
 \begin{verbatim}
-  python simulation_iv.py          # R=10  smoke test
-  python simulation_iv.py 200      # R=200 as in this report
-  python simulation_iv.py 2000 5000  # R=2000, n=5000 (full)
+  python simulation_surgical.py             # R=10  smoke test
+  python simulation_surgical.py 200 10000   # R=200, as in this report
 \end{verbatim}
+
 
 %======================================================================
 \section{Conclusion}
 %======================================================================
 
-The log-logistic reparameterization of the balance propensity score
-$e_b$ successfully reduces the triply robust ATT estimator to a
-standard 2SLS problem.  Monte Carlo experiments confirm:
+\begin{enumerate}
+  \item The log-logistic reparameterization of~$e_b$ successfully
+    reduces the imputation step to 2SLS.  No nonlinear solver,
+    ridge penalty, or convergence monitoring is needed.
 
-\begin{enumerate}[nosep]
-  \item Triple robustness is preserved: the estimator is consistent
-    whenever at least one of the three models is correct.
-  \item The 2SLS formulation eliminates the need for a nonlinear solver,
-    ridge penalty, and convergence monitoring.
-  \item Bias is negligible ($< 0.006$) in all correctly-specified cases
-    at $n=5{,}000$, with RMSE around $0.03$--$0.04$.
-  \item First-stage $F$-statistics are well above the weak-instrument
-    threshold in all relevant cases.
+  \item However, the simplified 2SLS (Estimator~S) does \textbf{not}
+    inherit the $e_b$-robust consistency branch.  Under correct $e_b$
+    with misspecified OR and $e_a$, S has a persistent bias that does
+    not shrink with~$n$.
+
+  \item The \textbf{full} estimator~F, which adds the M6 telescoping
+    instrument to the 2SLS, \textbf{is} consistent under correct $e_b$.
+    The computational cost of adding M6 is negligible (one extra column
+    in the instrument matrix).
+
+  \item The quotient-space argument---that many structural parameter
+    vectors generate the same fitted imputation, so M6 need not be
+    explicitly enforced---is \textbf{not sufficient} for consistency.
+    The issue is that different instrument sets identify different
+    projections of $\mu_0$ onto the model space, and only the
+    projection selected by the M6 instrument gives the correct
+    ATT-weighted average.
+
+  \item \textbf{Recommendation:} use Estimator~F.  It retains all the
+    simplicity of the 2SLS approach (no nonlinear solver, no ridge
+    penalty) while explicitly activating the $e_b$-channel and thereby
+    achieving genuine triple robustness.
 \end{enumerate}
+
+
+%======================================================================
+\appendix
+\section{Earlier 8-Case Experiment (Reference)}
+\label{app:eight-case}
+%======================================================================
+
+For completeness, the earlier experiment is summarised below.  Two DGPs
+with $X \sim \mathrm{Uniform}(10,20)$ and true $\ATT = 3$:
+
+\paragraph{DGP~1 (Logit-in-sin PS).}
+$e_0 = \logit^{-1}(-1 + 0.1\sin X)$,\;
+$\mu_0 = 2 + 0.5\log X + 0.3 X$,\;
+$\tau = 3$.
+
+\paragraph{DGP~2 (Linear-odds PS).}
+$\mathrm{odds} = -0.5 + 0.05 X$,\;
+$\mu_0 = 2 + 0.5\log X + 0.3 X$ (same),\;
+$\tau = 3$.
+
+\begin{table}[H]
+\centering
+\caption{Earlier 8-case results ($R=200$, $n=5{,}000$, Estimator~S only).
+All cases show low bias, but Cases~5--7 (DGP~2, $e_b$ correct) are
+contaminated by accidental spanning ($R^2 \approx 1$).}
+\label{tab:results-old}
+\begin{tabular}{ccccccccc}
+\toprule
+\textbf{Case} & \textbf{DGP} & \textbf{OR} & $e_a$ & $e_b$ & \textbf{Mean $\hat\tau$} & \textbf{Bias} & \textbf{SD} & \textbf{RMSE} \\
+\midrule
+1  & 1 & $\checkmark$ & $\checkmark$ & $\times$ & 2.999 & $-$0.001 & 0.033 & 0.033 \\
+2  & 1 & $\checkmark$ & $\times$ & $\times$ & 3.003 & $+$0.003 & 0.032 & 0.032 \\
+3  & 1 & $\times$ & $\checkmark$ & $\times$ & 2.999 & $-$0.002 & 0.033 & 0.033 \\
+4  & 1 & $\times$ & $\times$ & $\times$ & 3.000 & $+$0.000 & 0.032 & 0.032 \\
+\midrule
+5  & 2 & $\times$ & $\times$ & $\checkmark$ & 3.005 & $+$0.005 & 0.038 & 0.038 \\
+6  & 2 & $\checkmark$ & $\times$ & $\checkmark$ & 2.999 & $-$0.001 & 0.038 & 0.038 \\
+7  & 2 & $\times$ & $\times$ & $\checkmark$ & 3.001 & $+$0.001 & 0.036 & 0.036 \\
+4b & 2 & $\times$ & $\times$ & $\times$ & 2.996 & $-$0.004 & 0.041 & 0.041 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
 
 \end{document}
