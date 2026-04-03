@@ -6,7 +6,7 @@ a consistent ATT when ONLY the outcome regression is correct.
 
 DGP:
   X ~ Uniform[-2, 2]
-  e_true = 0.3 + 0.4 * exp(-X^2)   (bell-shaped, non-monotone)
+  e_true = 0.3 + 0.4 * exp(-X**2)  (bell-shaped, non-monotone)
   mu_0(X) = beta_0_true + 1.5 * X   (linear => OR q(X)=X is correct)
   tau = 2.0
 
