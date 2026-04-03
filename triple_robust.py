@@ -36,7 +36,7 @@ def _clip_ps(p, eps=1e-6):
 # Core estimator
 # ---------------------------------------------------------------------------
 
-def triply_robust_att(Y, D, X):
+def triply_robust_att(Y, D, X, alpha_oracle=None):
     """
     Triply robust estimator for the Average Treatment Effect on the Treated.
 
@@ -48,6 +48,11 @@ def triply_robust_att(Y, D, X):
         Binary treatment indicators (1 = treated, 0 = control).
     X : array-like, shape (n,)
         Single pre-treatment covariate.
+    alpha_oracle : array-like of length 2, optional
+        If provided, (alpha0, alpha1) are fixed to these oracle values and M1/M2
+        are dropped.  Only M3–M7 are solved for (gamma0, gamma1, beta0, beta1, phi).
+        Useful for isolating whether DGP-3 failures stem from logit estimation
+        of e_a or from a deeper issue in the remaining moment conditions (§4.2).
 
     Returns
     -------
@@ -59,6 +64,7 @@ def triply_robust_att(Y, D, X):
         gamma     : (gamma0, gamma1) — balance PS (probit) parameters
         m0_hat    : array, shape (n,) — fitted imputation values
         converged : bool
+        oracle_alpha : bool — True when alpha was pinned to supplied oracle values
     """
     Y = np.asarray(Y, dtype=float)
     D = np.asarray(D, dtype=float)
@@ -69,17 +75,24 @@ def triply_robust_att(Y, D, X):
     sinX = np.sin(X)
     ctrl = (D == 0)   # boolean mask for control units
 
+    use_oracle_alpha = alpha_oracle is not None
+    if use_oracle_alpha:
+        a0_fixed, a1_fixed = float(alpha_oracle[0]), float(alpha_oracle[1])
+
     # ------------------------------------------------------------------
     # Step 1: Starting values
     # ------------------------------------------------------------------
 
-    # a) Logit of D on sin(X) -> alpha starting values
-    try:
-        Xa = sm.add_constant(sinX)
-        logit_mod = Logit(D, Xa).fit(disp=False, maxiter=200)
-        alpha0_init, alpha1_init = logit_mod.params
-    except Exception:
-        alpha0_init, alpha1_init = 0.0, 0.0
+    # a) Logit of D on sin(X) -> alpha starting values (skipped when oracle)
+    if not use_oracle_alpha:
+        try:
+            Xa = sm.add_constant(sinX)
+            logit_mod = Logit(D, Xa).fit(disp=False, maxiter=200)
+            alpha0_init, alpha1_init = logit_mod.params
+        except Exception:
+            alpha0_init, alpha1_init = 0.0, 0.0
+    else:
+        alpha0_init, alpha1_init = a0_fixed, a1_fixed
 
     # b) Probit of D on X -> gamma starting values
     try:
@@ -100,47 +113,78 @@ def triply_robust_att(Y, D, X):
     # d) phi starting value
     phi_init = 0.0
 
-    theta0 = np.array([alpha0_init, alpha1_init,
-                       gamma0_init, gamma1_init,
-                       beta0_init, beta1_init,
-                       phi_init])
-
     # ------------------------------------------------------------------
-    # Step 2: Solve the 7 moment conditions
+    # Step 2: Solve moment conditions
+    # ------------------------------------------------------------------
+    # Full mode  : 7 equations, 7 unknowns (a0,a1,g0,g1,b0,b1,phi)
+    # Oracle mode: 5 equations, 5 unknowns (g0,g1,b0,b1,phi); alpha fixed
     # ------------------------------------------------------------------
 
-    def moment_conditions(theta):
-        a0, a1, g0, g1, b0, b1, phi = theta
+    if not use_oracle_alpha:
+        theta0 = np.array([alpha0_init, alpha1_init,
+                           gamma0_init, gamma1_init,
+                           beta0_init, beta1_init,
+                           phi_init])
 
-        idx_a = a0 + a1 * sinX
-        ea = _clip_ps(_invlogit(idx_a))
+        def moment_conditions(theta):
+            a0, a1, g0, g1, b0, b1, phi = theta
 
-        idx_g = g0 + g1 * X
-        eb = _clip_ps(norm.cdf(idx_g))
+            idx_a = a0 + a1 * sinX
+            ea = _clip_ps(_invlogit(idx_a))
 
-        m0 = b0 + b1 * logX + phi / (1.0 - eb)
-        R = Y - m0
+            idx_g = g0 + g1 * X
+            eb = _clip_ps(norm.cdf(idx_g))
 
-        odds_a = ea / (1.0 - ea)
-        odds_b = eb / (1.0 - eb)
+            m0 = b0 + b1 * logX + phi / (1.0 - eb)
+            R = Y - m0
 
-        w = 1.0 - D   # indicator for control units
+            odds_a = ea / (1.0 - ea)
+            odds_b = eb / (1.0 - eb)
 
-        M1 = np.mean((D - ea) * 1.0)
-        M2 = np.mean((D - ea) * sinX)
-        M3 = np.mean(w * R)
-        M4 = np.mean(w * logX * R)
-        M5 = np.mean(w * odds_a * R)
-        M6 = np.mean(w * (odds_b - odds_a) * R)
-        M7 = np.mean(w * X * (odds_b - odds_a) * R)
+            w = 1.0 - D   # indicator for control units
 
-        return np.array([M1, M2, M3, M4, M5, M6, M7])
+            M1 = np.mean((D - ea) * 1.0)
+            M2 = np.mean((D - ea) * sinX)
+            M3 = np.mean(w * R)
+            M4 = np.mean(w * logX * R)
+            M5 = np.mean(w * odds_a * R)
+            M6 = np.mean(w * (odds_b - odds_a) * R)
+            M7 = np.mean(w * X * (odds_b - odds_a) * R)
+
+            return np.array([M1, M2, M3, M4, M5, M6, M7])
+
+    else:
+        # Oracle mode: alpha pinned, solve 5-equation system for (g0,g1,b0,b1,phi)
+        theta0 = np.array([gamma0_init, gamma1_init,
+                           beta0_init, beta1_init,
+                           phi_init])
+
+        ea_fixed = _clip_ps(_invlogit(a0_fixed + a1_fixed * sinX))
+        odds_a_fixed = ea_fixed / (1.0 - ea_fixed)
+
+        def moment_conditions(theta):
+            g0, g1, b0, b1, phi = theta
+
+            idx_g = g0 + g1 * X
+            eb = _clip_ps(norm.cdf(idx_g))
+
+            m0 = b0 + b1 * logX + phi / (1.0 - eb)
+            R = Y - m0
+
+            odds_b = eb / (1.0 - eb)
+
+            w = 1.0 - D   # indicator for control units
+
+            M3 = np.mean(w * R)
+            M4 = np.mean(w * logX * R)
+            M5 = np.mean(w * odds_a_fixed * R)
+            M6 = np.mean(w * (odds_b - odds_a_fixed) * R)
+            M7 = np.mean(w * X * (odds_b - odds_a_fixed) * R)
+
+            return np.array([M3, M4, M5, M6, M7])
 
     # Convergence tolerance: accept if norm of moments is below this threshold
     _CONV_TOL = 1e-4
-
-    def _is_converged(theta):
-        return bool(np.linalg.norm(moment_conditions(theta)) < _CONV_TOL)
 
     best_theta = None
     best_norm = np.inf
@@ -200,11 +244,15 @@ def triply_robust_att(Y, D, X):
     theta_hat = best_theta if best_theta is not None else theta0
     converged = bool(best_norm < _CONV_TOL)
 
-    a0_h, a1_h, g0_h, g1_h, b0_h, b1_h, phi_h = theta_hat
+    # ------------------------------------------------------------------
+    # Step 3: Unpack solution and compute the ATT
+    # ------------------------------------------------------------------
 
-    # ------------------------------------------------------------------
-    # Step 3: Compute the ATT
-    # ------------------------------------------------------------------
+    if not use_oracle_alpha:
+        a0_h, a1_h, g0_h, g1_h, b0_h, b1_h, phi_h = theta_hat
+    else:
+        a0_h, a1_h = a0_fixed, a1_fixed
+        g0_h, g1_h, b0_h, b1_h, phi_h = theta_hat
 
     eb_hat = _clip_ps(norm.cdf(g0_h + g1_h * X))
     m0_hat = b0_h + b1_h * logX + phi_h / (1.0 - eb_hat)
@@ -219,4 +267,5 @@ def triply_robust_att(Y, D, X):
         'gamma': (g0_h, g1_h),
         'm0_hat': m0_hat,
         'converged': converged,
+        'oracle_alpha': use_oracle_alpha,
     }

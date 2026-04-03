@@ -221,8 +221,87 @@ def run_simulation(R=1000, n=2000, seed=42):
     print("DGP 2 is the sharpest test: only TR should be unbiased.\n")
 
 
+def run_dgp3_oracle_diagnostic(R=1000, n=2000, seed=42):
+    """
+    Oracle-alpha diagnostic for DGP 3 (§4.2 Bang-Robins channel).
+
+    Runs two variants on DGP 3 in parallel:
+      - TR_oracle : alpha fixed to true values (1.5, -0.8), solves M3-M7 only
+      - TR_full   : standard 7-equation TR estimator (estimated alpha)
+
+    If TR_oracle converges and is unbiased while TR_full fails, the §4.2
+    failure is *solely* due to poor logit estimation of alpha in this DGP.
+    If TR_oracle also fails, there is a deeper issue in the moment system.
+
+    True alpha: alpha0=1.5, alpha1=-0.8  (DGP 3 true propensity e_a parameters)
+    True ATT  : 4.0
+    """
+    TRUE_ATT = 4.0
+    ALPHA_TRUE = (1.5, -0.8)
+
+    print("\n" + "=" * 70)
+    print("DGP 3 Oracle-Alpha Diagnostic (§4.2 Bang-Robins channel)")
+    print(f"  Oracle alpha = {ALPHA_TRUE},  True ATT = {TRUE_ATT}")
+    print(f"  R={R} replications, n={n}")
+    print("=" * 70)
+
+    rng = np.random.default_rng(seed + 3)
+
+    oracle_list, full_list = [], []
+    n_oracle_conv = 0
+    n_full_conv = 0
+
+    for _ in range(R):
+        Y, D, X = dgp3(rng, n)
+
+        # Oracle: fix alpha to truth, solve M3-M7
+        res_oracle = triply_robust_att(Y, D, X, alpha_oracle=ALPHA_TRUE)
+        if res_oracle['converged']:
+            oracle_list.append(res_oracle['tau_att'])
+            n_oracle_conv += 1
+
+        # Full: standard 7-equation estimator
+        res_full = triply_robust_att(Y, D, X)
+        if res_full['converged']:
+            full_list.append(res_full['tau_att'])
+            n_full_conv += 1
+
+    oracle_conv_pct = 100.0 * n_oracle_conv / R
+    full_conv_pct = 100.0 * n_full_conv / R
+
+    def _summary(lst, label, conv_pct):
+        if lst:
+            arr = np.array(lst)
+            bias = float(np.mean(arr) - TRUE_ATT)
+            sd = float(np.std(arr))
+            rmse = float(np.sqrt(bias ** 2 + sd ** 2))
+        else:
+            bias = sd = rmse = float('nan')
+        print(f"  {label:<22}  Bias={bias:+.4f}  RMSE={rmse:.4f}  SD={sd:.4f}  "
+              f"Conv={conv_pct:.1f}%")
+
+    _summary(oracle_list, "TR (oracle alpha)", oracle_conv_pct)
+    _summary(full_list,   "TR (estimated alpha)", full_conv_pct)
+
+    print()
+    if oracle_conv_pct > 50 and oracle_list:
+        oracle_bias = abs(np.mean(oracle_list) - TRUE_ATT)
+        if oracle_bias < 0.1:
+            print("  => Oracle α converges with small bias: §4.2 failure is due")
+            print("     to logit estimation of alpha in this DGP, not the moment system.")
+        else:
+            print("  => Oracle α converges but bias is non-trivial: investigate")
+            print("     the remaining moment conditions M3-M7 (possible proof issue).")
+    else:
+        print("  => Oracle α also fails to converge: the issue is NOT just logit")
+        print("     estimation of alpha. The M3-M7 subsystem itself is problematic.")
+        print("     This may indicate a subtle issue in the §4.2 proof or moment design.")
+    print()
+
+
 if __name__ == '__main__':
     import sys
     R = int(sys.argv[1]) if len(sys.argv) > 1 else 1000
     n = int(sys.argv[2]) if len(sys.argv) > 2 else 2000
     run_simulation(R=R, n=n)
+    run_dgp3_oracle_diagnostic(R=R, n=n)
