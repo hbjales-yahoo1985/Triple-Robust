@@ -232,7 +232,7 @@ def run_dgp3_oracle_diagnostic(R=1000, n=2000, seed=42):
     then solve M3-M7).  They differ only in where alpha comes from:
 
       - TR (estimated alpha) : alpha estimated by logit MLE  [standard mode]
-      - TR (oracle alpha)    : alpha fixed to the DGP-3 true values (1.5, -0.8)
+      - TR (oracle alpha)    : alpha fixed to the DGP-3 true values (0.0, -1.5)
 
     Comparing the two isolates whether any remaining bias/non-convergence in
     DGP 3 is caused by error in the logit MLE of alpha, or by a structural
