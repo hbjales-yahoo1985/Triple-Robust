@@ -52,9 +52,11 @@ def dgp2(rng, n):
 
 
 def dgp3(rng, n):
-    """e_a (logit-on-sin) correct, OR and e_b wrong. True ATT = 4."""
+    """e_a (logit-on-sin) correct, OR and e_b wrong. True ATT = 4.
+    True alpha: (0.0, -1.5) -> propensities in ~[0.18, 0.82] for good common support.
+    """
     X = rng.uniform(10, 20, n)
-    e0 = _clip_ps(_invlogit(1.5 - 0.8 * np.sin(X)))
+    e0 = _clip_ps(_invlogit(0.0 - 1.5 * np.sin(X)))
     D = rng.binomial(1, e0, n)
     mu0 = 5 * np.sin(X) + 0.3 * X
     mu1 = 5 * np.sin(X) + 0.3 * X + 4
@@ -236,11 +238,11 @@ def run_dgp3_oracle_diagnostic(R=1000, n=2000, seed=42):
     DGP 3 is caused by error in the logit MLE of alpha, or by a structural
     problem in the M3-M7 sub-system itself.
 
-    True alpha: alpha0=1.5, alpha1=-0.8  (DGP 3 true propensity e_a parameters)
+    True alpha: alpha0=0.0, alpha1=-1.5  (DGP 3 true propensity e_a parameters)
     True ATT  : 4.0
     """
     TRUE_ATT = 4.0
-    ALPHA_TRUE = (1.5, -0.8)
+    ALPHA_TRUE = (0.0, -1.5)
 
     print("\n" + "=" * 70)
     print("DGP 3 Oracle-Alpha Diagnostic (§4.2 Bang-Robins channel)")
