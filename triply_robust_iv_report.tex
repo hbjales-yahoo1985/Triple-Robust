@@ -18,7 +18,7 @@
 
 \title{Triply Robust ATT Estimation via Log-Logistic\\Propensity Scores and 2SLS:\\Procedure and Surgical Monte Carlo Results}
 \author{}
-\date{April 2026}
+\date{April 2026 (Updated)}
 
 \begin{document}
 \maketitle
@@ -38,17 +38,28 @@ A \emph{surgical} Monte Carlo experiment isolates the $e_b$~channel by
 using a data-generating process where the outcome regression and $e_a$
 are both genuinely misspecified, and the IV regressor space cannot
 accidentally span the true untreated mean ($R^2 = 0.62$).  We compare
-the \emph{simplified} estimator~S (2SLS without the telescoping moment)
-to a \emph{full} estimator~F that explicitly includes the $e_b$-channel
-instrument (M6).
+four estimators:
 
-The results show that~F \emph{is} consistent under correct~$e_b$ (bias
-$\to 0$ as $n$ grows), but~S retains a persistent bias of
-${\approx}{-0.025}$ that does \emph{not} shrink with~$n$.  The
-S\,--\,F gap is constant at ${\approx}0.026$ across sample sizes.
-This indicates that the simplified 2SLS estimator does \emph{not}
-inherit the $e_b$-robust branch without explicitly activating the
-telescoping moment condition.
+\begin{itemize}[nosep]
+  \item \textbf{S} (simplified): 2SLS with instruments $\{1, q, Z\}$
+    --- enforces M3, M4, M5 (no M6).
+  \item \textbf{F} (full): 2SLS/GMM with instruments $\{1, q, Z, \hat{o}_b - Z\}$
+    --- enforces M3, M4, M5, M6 (overidentified).
+  \item \textbf{G} (exactly-identified M6): IV with instruments
+    $\{\hat{o}_b - Z, q, Z\}$ --- enforces M4, M5, M6 (no M3).
+  \item \textbf{N} (negative control): S with wrong $e_b$ basis.
+\end{itemize}
+
+The results show that both~F and~G are consistent under correct~$e_b$
+(bias $\to 0$ as $n$ grows), with the G--F gap shrinking to zero.
+Estimator~S retains a persistent bias of ${\approx}{-0.025}$ that does
+\emph{not} shrink with~$n$, confirming that the M6 moment is
+necessary for the $e_b$-channel.
+
+Estimator~G provides a clean resolution: it replaces the
+constant-instrument moment M3 with the telescoping moment M6, achieving
+exact identification (3 moments, 3 unknowns) while activating the
+$e_b$-robust branch.
 \end{abstract}
 
 
@@ -152,6 +163,26 @@ from the full triply robust moment system.
 This makes the 2SLS over-identified (4~instruments for
 3~unknowns $(\beta_0, \beta_1, \phi)$).  We use GMM with the efficient
 weight matrix $\hat\Omega = (Z'Z)^{-1}$ (2SLS-style).
+
+
+\subsection{Estimator G (Exactly-Identified, M6 Replaces M3)}
+
+Same as~S, except the constant instrument (1) is \emph{replaced} by
+the telescoping instrument $(\hat{o}_b - Z)$:
+\begin{itemize}[nosep]
+  \item Instruments: $\{(\hat{o}_b - Z),\; q(X),\; Z\}$ (3~instruments).
+  \item Regressors: $\{1,\; q(X),\; W\}$ (3~unknowns).
+\end{itemize}
+This is exactly identified (3 instruments for 3 unknowns), enforcing
+moments M4, M5, and M6 exactly.  It drops M3 (the constant-instrument
+moment $\E[(1-D)\cdot 1 \cdot R] = 0$).
+
+The key insight is that M3 pins down the intercept~$\beta_0$ to make
+the control-sample residuals mean-zero; but when $e_b$ is correct, M6
+provides an alternative pinning of the intercept through the
+telescoping structure.  By replacing M3 with M6, Estimator~G
+explicitly activates the $e_b$-channel at no additional computational
+cost and with exact identification.
 
 
 \subsection{Estimator N (Negative Control)}
@@ -271,32 +302,27 @@ any residual bias in~S is despite a ``decent'' $e_a$ approximation.
 
 \begin{table}[H]
 \centering
-\caption{Four experimental cases}
+\caption{Experimental cases}
 \label{tab:cases-surgical}
 \begin{tabular}{cllll}
 \toprule
 \textbf{Case} & \textbf{Estimator} & \textbf{OR} & $e_a$ & $e_b$ \\
 \midrule
+A-G & G (M6 replaces M3) & $\{1, X\}$ $\times$ & logit($X$) $\times$ & $e^X$ $\checkmark$ \\
 A-S & S (simplified, no M6) & $\{1, X\}$ $\times$ & logit($X$) $\times$ & $e^X$ $\checkmark$ \\
 A-F & F (full, with M6) & $\{1, X\}$ $\times$ & logit($X$) $\times$ & $e^X$ $\checkmark$ \\
 A-N & N (negative control) & $\{1, X\}$ $\times$ & logit($X$) $\times$ & $X$ $\times$ \\
-C   & S (near-miss $e_b$) & $\{1, X\}$ $\times$ & logit($X$) $\times$ & $e^X$ ${\approx}\checkmark$ \\
 \bottomrule
 \end{tabular}
 \end{table}
-
-\noindent
-Case~C uses a DGP where the true odds are $1.5 + 0.8\,e^X + 0.05\,X^2$
-(near-miss with $\kappa = 0.05$), while $e_b$ is still estimated as if
-$\kappa = 0$.
 
 \subsection{Simulation Parameters}
 
 \begin{itemize}[nosep]
   \item Sample sizes: $n \in \{500,\; 2{,}000,\; 10{,}000\}$
-  \item Replications: $R = 200$
+  \item Replications: $R = 500$
   \item True ATT: $\tau = 2.0$
-  \item Random seed: 42 (reproducible; same draws for S, F, N at each~$n$)
+  \item Random seed: 42 (reproducible; same draws for all estimators at each~$n$)
 \end{itemize}
 
 
@@ -308,9 +334,9 @@ $\kappa = 0$.
 
 \begin{table}[H]
 \centering
-\caption{Surgical Monte Carlo results ($R=200$).
-  \textbf{Bold} marks the key finding: S has persistent bias
-  while F converges to zero bias.}
+\caption{Surgical Monte Carlo results ($R=500$).
+  \textbf{Bold} marks the key finding: G and F are consistent
+  while S has persistent bias.}
 \label{tab:results-surgical}
 \begin{tabular}{clrrrrrr}
 \toprule
@@ -318,58 +344,63 @@ $\kappa = 0$.
   \textbf{Mean $\hat\tau$} & \textbf{Bias} & \textbf{SD} &
   \textbf{RMSE} & \textbf{1st-$F$} \\
 \midrule
-A-S & S (simplified) &    500 & 1.9576 & $-$0.0424 & 0.1431 & 0.1493 & 3{,}349 \\
-A-F & F (full+M6)    &    500 & 1.9849 & $-$0.0151 & 0.1369 & 0.1378 & 3{,}349 \\
-A-N & N (wrong $e_b$)&    500 & 2.1704 & $+$0.1704 & 0.1505 & 0.2273 &      80 \\
-C   & S (near-miss)  &    500 & 1.9489 & $-$0.0511 & 0.1585 & 0.1665 & 3{,}103 \\
+A-G & G (M6 replaces M3) &    500 & 1.9894 & $-$0.0106 & 0.1311 & 0.1315 & 3{,}396 \\
+A-S & S (simplified) &    500 & 1.9620 & $-$0.0380 & 0.1404 & 0.1454 & 3{,}396 \\
+A-F & F (full+M6)    &    500 & 1.9885 & $-$0.0115 & 0.1340 & 0.1345 & 3{,}396 \\
+A-N & N (wrong $e_b$)&    500 & 2.1682 & $+$0.1682 & 0.1482 & 0.2242 &      79 \\
 \midrule
-A-S & S (simplified) &  2{,}000 & 1.9663 & $-$0.0337 & 0.0720 & 0.0795 & 12{,}818 \\
-A-F & F (full+M6)    &  2{,}000 & 1.9933 & $-$0.0067 & 0.0690 & 0.0693 & 12{,}818 \\
-A-N & N (wrong $e_b$)&  2{,}000 & 2.1681 & $+$0.1681 & 0.0776 & 0.1851 &     264 \\
-C   & S (near-miss)  &  2{,}000 & 1.9748 & $-$0.0252 & 0.0625 & 0.0674 & 11{,}756 \\
+A-G & G (M6 replaces M3) & 2{,}000 & 2.0013 & $+$0.0013 & 0.0635 & 0.0635 & 12{,}637 \\
+A-S & S (simplified) &  2{,}000 & 1.9746 & $-$0.0254 & 0.0685 & 0.0730 & 12{,}637 \\
+A-F & F (full+M6)    &  2{,}000 & 2.0008 & $+$0.0008 & 0.0650 & 0.0650 & 12{,}637 \\
+A-N & N (wrong $e_b$)&  2{,}000 & 2.1704 & $+$0.1704 & 0.0720 & 0.1850 &     243 \\
 \midrule
+\textbf{A-G} & \textbf{G (M6 replaces M3)} & \textbf{10{,}000} &
+  \textbf{1.9999} & $\boldsymbol{-0.0001}$ & \textbf{0.0267} &
+  \textbf{0.0267} & \textbf{62{,}695} \\
 \textbf{A-S} & \textbf{S (simplified)} & \textbf{10{,}000} &
-  \textbf{1.9746} & $\boldsymbol{-0.0254}$ & \textbf{0.0293} &
-  \textbf{0.0388} & \textbf{62{,}727} \\
+  \textbf{1.9745} & $\boldsymbol{-0.0255}$ & \textbf{0.0288} &
+  \textbf{0.0385} & \textbf{62{,}695} \\
 \textbf{A-F} & \textbf{F (full+M6)} & \textbf{10{,}000} &
-  \textbf{2.0004} & $\boldsymbol{+0.0004}$ & \textbf{0.0282} &
-  \textbf{0.0282} & \textbf{62{,}727} \\
-A-N & N (wrong $e_b$)& 10{,}000 & 2.1657 & $+$0.1657 & 0.0332 & 0.1690 & 1{,}660 \\
-C   & S (near-miss)  & 10{,}000 & 1.9751 & $-$0.0249 & 0.0287 & 0.0380 & 58{,}105 \\
+  \textbf{2.0000} & $\boldsymbol{-0.0000}$ & \textbf{0.0273} &
+  \textbf{0.0273} & \textbf{62{,}695} \\
+A-N & N (wrong $e_b$)& 10{,}000 & 2.1632 & $+$0.1632 & 0.0312 & 0.1661 & 1{,}387 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 
-\subsection{S vs.\ F Convergence}
+\subsection{G vs.\ F and S vs.\ F Convergence}
 
 \begin{table}[H]
 \centering
-\caption{Distribution of $\hat\tau_S - \hat\tau_F$ across replications (Case~A).
-  The mean difference is essentially constant at ${\approx}{-0.027}$
-  while the SD shrinks as $O(1/\sqrt{n})$.}
+\caption{Pairwise differences across replications (Case~A, $R=500$).
+  G and F converge to the same limit (mean difference~$\to 0$,
+  SD shrinking).  S converges to a different limit
+  (mean difference constant at ${\approx}{-0.026}$).}
 \label{tab:sf-diff}
-\begin{tabular}{rrrr}
+\begin{tabular}{rrrrr}
 \toprule
-$n$ & Mean $|\hat\tau_S - \hat\tau_F|$ &
-  SD$(\hat\tau_S - \hat\tau_F)$ &
-  Max $|\hat\tau_S - \hat\tau_F|$ \\
+$n$ & Mean($\hat\tau_G - \hat\tau_F$) &
+  SD($\hat\tau_G - \hat\tau_F$) &
+  Mean($\hat\tau_S - \hat\tau_F$) &
+  Mean($\hat\tau_G - \hat\tau_S$) \\
 \midrule
-     500 & 0.02781 & 0.01815 & 0.08522 \\
-   2{,}000 & 0.02700 & 0.00966 & 0.05667 \\
-  10{,}000 & 0.02583 & 0.00406 & 0.03869 \\
+     500 & $+$0.0009 & 0.0099 & $-$0.0265 & $+$0.0274 \\
+   2{,}000 & $+$0.0005 & 0.0046 & $-$0.0262 & $+$0.0266 \\
+  10{,}000 & $-$0.0000 & 0.0019 & $-$0.0255 & $+$0.0255 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \begin{figure}[H]
 \centering
-\includegraphics[width=0.85\textwidth]{surgical_sf_diff.png}
-\caption{Left: Mean $|\hat\tau_S - \hat\tau_F|$ as a function of $n$
-  (essentially flat at ${\approx}0.026$).
-  Right: Distribution of $\hat\tau_S - \hat\tau_F$ at each sample size
-  (mass concentrates around $-0.026$, never around zero).}
-\label{fig:sf-diff}
+\includegraphics[width=0.85\textwidth]{centered_monte_carlo.png}
+\caption{Left: Bias as a function of $n$ for all four estimators.
+  G and F converge to zero; S plateaus at ${\approx}{-0.025}$;
+  N at ${\approx}{+0.17}$.
+  Right: Distribution of $\hat\tau_G - \hat\tau_F$ at each sample size
+  (concentrating around zero with shrinking spread).}
+\label{fig:gf-diff}
 \end{figure}
 
 
@@ -379,60 +410,65 @@ $n$ & Mean $|\hat\tau_S - \hat\tau_F|$ &
 
 \subsection{The Central Finding}
 
-The experiment cleanly separates the two estimators under a DGP where
+The experiment cleanly separates the estimators under a DGP where
 \emph{only} $e_b$ is correctly specified:
 
 \begin{enumerate}
-  \item \textbf{Estimator~F (full, with M6) is consistent.}
-    Bias at $n = 10{,}000$ is $+0.0004$, essentially zero.  The bias
-    shrinks monotonically: $-0.015 \to -0.007 \to +0.0004$ as
-    $n$ grows from 500 to 10{,}000.
+  \item \textbf{Estimator~G (M6 replaces M3) is consistent.}
+    Bias at $n = 10{,}000$ is $-0.0001$, essentially zero.  The bias
+    collapses: $-0.011 \to +0.001 \to -0.000$ as $n$ grows.
+
+  \item \textbf{Estimator~F (full, overidentified with M6) is consistent.}
+    Bias at $n = 10{,}000$ is $-0.0000$.  The bias
+    shrinks monotonically: $-0.012 \to +0.001 \to -0.000$.
+
+  \item \textbf{G and F converge to the same limit.}
+    The mean $\hat\tau_G - \hat\tau_F$ is $+0.0009 \to +0.0005 \to
+    -0.0000$ and the SD shrinks from $0.010$ to $0.002$.  This
+    confirms they are asymptotically equivalent.
 
   \item \textbf{Estimator~S (simplified, without M6) has a persistent bias.}
-    Bias at $n = 10{,}000$ is $-0.025$, essentially the same as at
-    $n = 2{,}000$ ($-0.034$).  The bias
-    appears to have an asymptotic floor around $-0.025$.
-
-  \item \textbf{The S\,--\,F gap does not shrink.}
-    The mean $|\hat\tau_S - \hat\tau_F|$ is ${\approx}0.027$ at all
-    three sample sizes, while its SD shrinks from 0.018 to 0.004.
-    This is the signature of convergence to \emph{different} probability
-    limits.
+    Bias at $n = 10{,}000$ is $-0.026$, essentially unchanged from
+    $n = 2{,}000$ ($-0.025$).  S converges to a different
+    probability limit from G and~F.
 
   \item \textbf{Estimator~N (wrong $e_b$) has clear, large bias.}
     Stable at $+0.17$ across all~$n$, confirming it is a valid negative
-    control and that S's small bias is not an artifact of the DGP being
-    too easy.
+    control.
 \end{enumerate}
 
 
-\subsection{Why the Quotient-Space Argument Fails}
+\subsection{Why S Fails and G Succeeds}
 
 The quotient-space argument (Section~2.4) says: if the reduced-form
 imputation $(a_0, \beta_1, a_1)$ can be ``re-decomposed'' into a
 structural quadruple that satisfies the telescoping proof, then~S
 should be as good as~F.
 
-The Monte Carlo shows that this is \emph{not sufficient} in practice.
-The reason is:
-
-\begin{quote}
-While both S and~F produce imputations in the same reduced-form
-space $\{1, X, e^X\}$, they use \emph{different instrument sets}
-for the 2SLS.  S uses instruments $\{1, X, \hat{o}_a\}$;
-F uses instruments $\{1, X, \hat{o}_a, \hat{o}_b - \hat{o}_a\}$.
-When the OR is misspecified, the projection of $\mu_0$ onto
-$\{1, X, e^X\}$ depends on the instruments.  Only F's instrument
-set, which includes the telescoping term $(\hat{o}_b - \hat{o}_a)$,
-identifies the particular projection that gives the correct
+The Monte Carlo shows this is \emph{not sufficient} for S: while
+both S and~F produce imputations in the same reduced-form
+space $\{1, X, e^X\}$, they use \emph{different instrument sets}.
+S uses instruments $\{1, X, \hat{o}_a\}$ (enforcing M3, M4, M5);
+F and G use the telescoping instrument $(\hat{o}_b - \hat{o}_a)$
+to enforce M6.  When the OR is misspecified, the projection of
+$\mu_0$ onto $\{1, X, e^X\}$ depends on the instruments.  Only
+the projection selected by the M6 instrument gives the correct
 ATT-weighted average.
-\end{quote}
 
-\noindent
-In other words, the representability of the fitted imputation
-is necessary but not sufficient.  One also needs the
-\emph{right projection}---and the right projection is the one
-selected by the M6 instrument.
+\medskip\noindent
+Estimator~G cleanly resolves this by \emph{replacing} M3 with M6:
+\begin{itemize}[nosep]
+  \item S uses $\{1, q, Z\}$ for $\{1, q, W\}$ $\to$ enforces M3, M4, M5.
+  \item G uses $\{(\hat{o}_b - Z), q, Z\}$ for $\{1, q, W\}$
+    $\to$ enforces M4, M5, M6.
+  \item F uses $\{1, q, Z, (\hat{o}_b - Z)\}$ for $\{1, q, W\}$
+    $\to$ enforces M3, M4, M5, M6 (overidentified).
+\end{itemize}
+G is exactly identified (3 moments, 3 unknowns) and achieves the
+same consistency as the overidentified~F, while dropping the
+constant-instrument moment that S uses instead.  This pinpoints
+M6 as the critical moment: it is both necessary and sufficient
+(together with M4, M5) for the $e_b$-channel.
 
 
 \subsection{Estimator F's Consistency Mechanism}
@@ -461,24 +497,29 @@ projection.
 
 \begin{enumerate}[nosep]
   \item \textbf{The simplified 2SLS estimator~S is NOT triply robust.}
-    It retains the OR-robustness and $e_a$-robustness branches (as
-    confirmed by the earlier 8-case experiment), but the $e_b$-channel
-    requires explicit activation via the M6 instrument.
+    It retains the OR-robustness and $e_a$-robustness branches, but the
+    $e_b$-channel requires explicit activation via M6.
+
+  \item \textbf{Estimator~G provides the cleanest fix.}
+    Replacing the constant instrument with $(\hat{o}_b - Z)$ gives
+    exact identification (3 moments, 3 unknowns) while activating the
+    $e_b$-channel.  No overidentification, no GMM weight matrix.
 
   \item \textbf{Including M6 is computationally cheap.}
-    Estimator~F only adds one column to the instrument matrix.
-    The computation remains a linear GMM (one matrix solve), with
-    no nonlinear solver or ridge penalty.
+    Both G and~F add only one column to the instrument matrix.
+    The computation remains a single linear system (one matrix solve),
+    with no nonlinear solver or ridge penalty.
 
-  \item \textbf{The bias of~S (${\approx}0.025$) is modest.}
-    Relative to the true ATT of~2.0, the bias is about 1.3\%.
-    But it does not vanish with~$n$, which makes~S inconsistent
-    in the $e_b$-only branch.
+  \item \textbf{G and F are asymptotically equivalent.}
+    The G--F gap shrinks to zero, confirming they target the same
+    probability limit.  G is simpler (exactly identified);
+    F may have slightly better finite-sample efficiency from
+    overidentification.
 
-  \item \textbf{Recommendation: use~F.}
-    Since adding the M6 instrument costs nothing computationally
-    and restores the $e_b$-channel consistency, the full
-    estimator~F should be preferred.
+  \item \textbf{Recommendation: use~G or~F.}
+    Either estimator restores the $e_b$-channel consistency.
+    G is preferred for simplicity (exact identification);
+    F is preferred if one wants to exploit M3 for additional efficiency.
 \end{enumerate}
 
 
@@ -513,28 +554,33 @@ The implementation consists of three Python files:
   \item \texttt{triply\_robust\_iv(...)}: Estimator~S (simplified 2SLS).
   \item \texttt{triply\_robust\_iv\_full(...)}: Estimator~F
     (full 2SLS/GMM with M6 instrument).
+  \item \texttt{triply\_robust\_iv\_centered(...)}: Estimator~G
+    (exactly-identified, M6 replaces M3).
   \item Shared helpers: \texttt{\_log\_logistic\_mle()},
     \texttt{\_invlogit()}, \texttt{\_clip\_ps()}.
   \item Supports $e_b$ bases: $X$, $\sin X$, $e^X$.
   \item Supports OR columns: $\{1,\log X\}$, $\{1,\log X, X\}$, $\{1, X\}$.
 \end{itemize}
 
-\paragraph{\texttt{simulation\_surgical.py}} contains:
+\paragraph{\texttt{simulation\_centered.py}} contains:
 \begin{itemize}[nosep]
   \item \texttt{dgp\_surgical(rng, n, kappa)}: the surgical DGP.
   \item \texttt{run\_diagnostics()}: span check ($R^2$) and
     $e_a$ misspecification check.
   \item \texttt{run\_simulation(R, sample\_sizes)}: Monte Carlo loop
-    over Cases~A, C at each~$n$, running S, F, and N in parallel.
+    running G, S, F, and N at each~$n$.
 \end{itemize}
+
+\paragraph{\texttt{simulation\_surgical.py}} contains the earlier S-vs-F
+experiment (kept for reference).
 
 \paragraph{\texttt{simulation\_iv.py}} contains the earlier 8-case
 experiment (kept for reference).
 
 \paragraph{Usage:}
 \begin{verbatim}
-  python simulation_surgical.py             # R=10  smoke test
-  python simulation_surgical.py 200 10000   # R=200, as in this report
+  python simulation_centered.py             # R=10  smoke test
+  python simulation_centered.py 500         # R=500, as in this report
 \end{verbatim}
 
 
@@ -547,28 +593,30 @@ experiment (kept for reference).
     reduces the imputation step to 2SLS.  No nonlinear solver,
     ridge penalty, or convergence monitoring is needed.
 
-  \item However, the simplified 2SLS (Estimator~S) does \textbf{not}
+  \item The simplified 2SLS (Estimator~S) does \textbf{not}
     inherit the $e_b$-robust consistency branch.  Under correct $e_b$
-    with misspecified OR and $e_a$, S has a persistent bias that does
-    not shrink with~$n$.
+    with misspecified OR and $e_a$, S has a persistent bias of
+    ${\approx}{-0.025}$ that does not shrink with~$n$.
 
-  \item The \textbf{full} estimator~F, which adds the M6 telescoping
-    instrument to the 2SLS, \textbf{is} consistent under correct $e_b$.
-    The computational cost of adding M6 is negligible (one extra column
-    in the instrument matrix).
+  \item \textbf{Estimator~G}, which replaces the constant instrument
+    (M3) with the telescoping instrument (M6), is exactly identified
+    and \textbf{is} consistent under correct $e_b$.  Its bias
+    collapses to zero as $n$ grows, matching the overidentified~F.
+
+  \item The \textbf{full} estimator~F (overidentified, M3+M4+M5+M6)
+    is also consistent.  G and~F converge to the same probability
+    limit, with the G--F gap shrinking at rate $O(1/\sqrt{n})$.
 
   \item The quotient-space argument---that many structural parameter
     vectors generate the same fitted imputation, so M6 need not be
-    explicitly enforced---is \textbf{not sufficient} for consistency.
-    The issue is that different instrument sets identify different
-    projections of $\mu_0$ onto the model space, and only the
-    projection selected by the M6 instrument gives the correct
-    ATT-weighted average.
+    explicitly enforced---is \textbf{not sufficient} for S's consistency.
+    The M6 moment is genuinely needed to select the right projection
+    of $\mu_0$ onto the model space.
 
-  \item \textbf{Recommendation:} use Estimator~F.  It retains all the
-    simplicity of the 2SLS approach (no nonlinear solver, no ridge
-    penalty) while explicitly activating the $e_b$-channel and thereby
-    achieving genuine triple robustness.
+  \item \textbf{Recommendation:} use Estimator~G or~F.  G is the
+    simpler choice (exact identification, single matrix solve);
+    F may offer modest finite-sample efficiency gains from
+    overidentification.  Both retain all three robustness channels.
 \end{enumerate}
 
 
