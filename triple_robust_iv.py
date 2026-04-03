@@ -393,8 +393,7 @@ def triply_robust_iv_full(Y, D, X,
 def triply_robust_iv_centered(Y, D, X,
                                ea_basis='X',
                                eb_basis='expX',
-                               or_columns='X',
-                               **kwargs):
+                               or_columns='X'):
     """
     Exactly-identified triply robust ATT estimator (Estimator G).
 
