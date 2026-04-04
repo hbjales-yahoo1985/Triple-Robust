@@ -2,18 +2,29 @@
 Simulation: Chan vs IV Stacking Under Model Similarity & Accidental Spanning
 =============================================================================
 
-**KEY FINDING**: IV stacking has OR-channel robustness only (not PS-channel).
-When the correct PS is present but no OR model spans μ(X), IV has persistent
-bias. Chan converges because its {1, 1/π̂} terms provide PS-channel correction.
-IV's consistency requires μ(X) ∈ span(m̂₁,...,m̂_K) under the weighted inner
-product w(X) = e²(X)/(1-e(X)), which is NOT guaranteed by correct PS alone.
+**KEY FINDING (updated)**: The original IV stacking (odds instruments) had
+OR-channel robustness only — not PS-channel. The root cause was the instrument
+choice: odds o_k = e_k/(1-e_k) on complete cases creates effective weight
+e²/(1-e), which doesn't match the uniform-measure prediction μ̂ = (1/n)ΣM·φ.
+
+**FIX**: Using 1/π̂_k as instruments instead of odds restores PS-channel
+robustness. The instrument 1/e on complete cases gives effective weight
+e·(1/e) = 1 (uniform), matching the prediction measure. This is exactly the
+Bang-Robins mechanism: the 1/π̂ correction makes residuals mean-zero under
+the correct (uniform) measure.
+
+At R=200, n=5000 (S1: correct PS, wrong OR, no spanning):
+  IV (odds):    bias = +0.043  (persistent — wrong measure)
+  IV_int:       bias = -0.086  (intercept doesn't help)
+  IV_ips (1/π̂): bias = +0.001  (PS-channel ✓, matches Chan)
+  Chan:         bias = +0.002  (PS-channel ✓)
+
+IV_ips also retains OR-channel robustness (S3: all estimators equivalent
+when OR models span truth).
 
 **INTERCEPT TEST**: Adding a constant column to both instruments and regressors
-(IV_int) does NOT restore the PS-channel. At R=100, n=5000: IV bias=+0.048,
-IV_int bias=-0.080, Chan bias=+0.004. The constant-on-constant moment only
-pins E[Y|R=1], not E[Y]. PS-channel correction requires 1/π̂ as a REGRESSOR
-(as Chan does), because only regressors enter the prediction μ̂ = (1/n)ΣM·φ.
-Instruments affect coefficient estimation but not the prediction formula.
+(IV_int) does NOT restore the PS-channel. At R=200, n=5000: IV_int bias=-0.086.
+The constant-on-constant moment only pins E[Y|R=1], not E[Y].
 
 Two questions:
 
@@ -182,6 +193,46 @@ def iv_stacking_with_intercept(Y, R, ps_fitted_list, or_fitted_list):
         phi = np.linalg.solve(OtM, OtY)
     except np.linalg.LinAlgError:
         phi, _, _, _ = np.linalg.lstsq(OtM, OtY, rcond=None)
+    return float(np.mean(M_all @ phi)), cond_num
+
+
+def iv_stacking_invps(Y, R, ps_fitted_list, or_fitted_list):
+    """
+    IV stacking with 1/π̂_k instruments (inverse propensity).
+
+    Regressors: {m̂_1,...,m̂_K}        (K columns, no intercept)
+    Instruments: {1/π̂_1,...,1/π̂_K}   (K columns)
+
+    Moment condition on complete cases (R=1):
+        E_{R=1}[(1/e_k) · (Y − Σ φ_j m̂_j)] = 0
+
+    When e_k = e (correct PS), this becomes:
+        E[(1/e)·e · (μ − Σφ_j m̂_j)] = E[μ − Σφ_j m̂_j] = 0
+
+    The selection weight e and the instrument 1/e cancel, giving orthogonality
+    under the UNIFORM measure — which matches the prediction μ̂ = (1/n)ΣM·φ.
+    This is the Bang-Robins mechanism: 1/π̂ corrects for selection.
+
+    Compare with odds instruments o_k = e_k/(1-e_k):
+        E[(e/(1-e))·e · (μ − Σφ_j m̂_j)] = E[e²/(1-e) · (μ − Σφ_j m̂_j)] = 0
+    The e² measure does NOT match the uniform prediction measure.
+
+    Returns (mu_hat, cond_num).
+    """
+    n = len(Y)
+    complete = (R == 1)
+    M_all = np.column_stack(or_fitted_list)
+    Z_all = np.column_stack([1.0 / _clip_ps(ps) for ps in ps_fitted_list])
+    M_c = M_all[complete]
+    Z_c = Z_all[complete]
+    Y_c = Y[complete]
+    ZtM = Z_c.T @ M_c
+    ZtY = Z_c.T @ Y_c
+    cond_num = float(np.linalg.cond(ZtM))
+    try:
+        phi = np.linalg.solve(ZtM, ZtY)
+    except np.linalg.LinAlgError:
+        phi, _, _, _ = np.linalg.lstsq(ZtM, ZtY, rcond=None)
     return float(np.mean(M_all @ phi)), cond_num
 
 
@@ -386,8 +437,8 @@ def run_scenario_generic(dgp_func, ps_cov_funcs, or_cov_funcs,
     assert K == len(or_cov_funcs), "K must match for IV stacking"
 
     results = {
-        'IV': [], 'IV_int': [], 'Chan': [], 'Oracle': [],
-        'IV_cond': [], 'IV_int_cond': [], 'Chan_cond': [],
+        'IV': [], 'IV_int': [], 'IV_ips': [], 'Chan': [], 'Oracle': [],
+        'IV_cond': [], 'IV_int_cond': [], 'IV_ips_cond': [], 'Chan_cond': [],
         'DR_best': [], 'DR_worst': [],
         'span_r2': [], 'regressor_corr_max': [],
     }
@@ -444,6 +495,16 @@ def run_scenario_generic(dgp_func, ps_cov_funcs, or_cov_funcs,
         except Exception:
             results['IV_int'].append(np.nan)
             results['IV_int_cond'].append(np.nan)
+
+        # IV stacking with 1/π̂ instruments
+        try:
+            mu_iv_ips, cond_iv_ips = iv_stacking_invps(
+                Y_safe, R, ps_fitted, or_fitted)
+            results['IV_ips'].append(mu_iv_ips)
+            results['IV_ips_cond'].append(cond_iv_ips)
+        except Exception:
+            results['IV_ips'].append(np.nan)
+            results['IV_ips_cond'].append(np.nan)
 
         # Chan OLS
         try:
@@ -521,9 +582,9 @@ def run_S1(R_reps, sample_sizes, seed=42):
     for n_val in sample_sizes:
         res = run_scenario_generic(dgp_no_spanning, ps_funcs, or_funcs,
                                    n_val, R_reps, seed)
-        for est in ['IV', 'IV_int', 'Chan', 'DR_best', 'DR_worst']:
+        for est in ['IV', 'IV_int', 'IV_ips', 'Chan', 'DR_best', 'DR_worst']:
             mn, bias, sd, rmse = _stats(res[est], true_EY)
-            cond_key = f'{est}_cond' if est in ['IV', 'IV_int', 'Chan'] else None
+            cond_key = f'{est}_cond' if est in ['IV', 'IV_int', 'IV_ips', 'Chan'] else None
             if cond_key and cond_key in res:
                 conds = np.array(res[cond_key], dtype=float)
                 conds = conds[~np.isnan(conds)]
@@ -571,9 +632,9 @@ def run_S2(R_reps, sample_sizes, seed=42):
     for n_val in sample_sizes:
         res = run_scenario_generic(dgp_diverse, ps_funcs, or_funcs,
                                    n_val, R_reps, seed)
-        for est in ['IV', 'IV_int', 'Chan', 'DR_best', 'DR_worst']:
+        for est in ['IV', 'IV_int', 'IV_ips', 'Chan', 'DR_best', 'DR_worst']:
             mn, bias, sd, rmse = _stats(res[est], true_EY)
-            cond_key = f'{est}_cond' if est in ['IV', 'IV_int', 'Chan'] else None
+            cond_key = f'{est}_cond' if est in ['IV', 'IV_int', 'IV_ips', 'Chan'] else None
             if cond_key and cond_key in res:
                 conds = np.array(res[cond_key], dtype=float)
                 conds = conds[~np.isnan(conds)]
@@ -642,9 +703,9 @@ def run_S3(R_reps, sample_sizes, seed=42):
             print(f"  Max off-diag |corr| in Chan regressors: "
                   f"{res['regressor_corr_max'][0]:.4f}")
 
-        for est in ['IV', 'IV_int', 'Chan', 'DR_best', 'DR_worst']:
+        for est in ['IV', 'IV_int', 'IV_ips', 'Chan', 'DR_best', 'DR_worst']:
             mn, bias, sd, rmse = _stats(res[est], true_EY)
-            cond_key = f'{est}_cond' if est in ['IV', 'IV_int', 'Chan'] else None
+            cond_key = f'{est}_cond' if est in ['IV', 'IV_int', 'IV_ips', 'Chan'] else None
             if cond_key and cond_key in res:
                 conds = np.array(res[cond_key], dtype=float)
                 conds = conds[~np.isnan(conds)]
@@ -768,7 +829,7 @@ def run_S4(R_reps, n=1000, seed=42):
         or_fitted_rep = [fit_or_model(Y_safe, X, R, f) for f in or_funcs]
         or_corr = _or_fitted_correlation(R, or_fitted_rep)
 
-        for est in ['IV', 'IV_int', 'Chan']:
+        for est in ['IV', 'IV_int', 'IV_ips', 'Chan']:
             mn, bias, sd, rmse = _stats(res[est], true_EY)
             conds = np.array(res[f'{est}_cond'], dtype=float)
             conds = conds[~np.isnan(conds)]
@@ -852,9 +913,9 @@ def run_S5(R_reps, sample_sizes, seed=42):
             print(f"  Max off-diag |corr| in Chan regressors: "
                   f"{res['regressor_corr_max'][0]:.4f}")
 
-        for est in ['IV', 'IV_int', 'Chan', 'DR_best', 'DR_worst']:
+        for est in ['IV', 'IV_int', 'IV_ips', 'Chan', 'DR_best', 'DR_worst']:
             mn, bias, sd, rmse = _stats(res[est], true_EY)
-            cond_key = f'{est}_cond' if est in ['IV', 'IV_int', 'Chan'] else None
+            cond_key = f'{est}_cond' if est in ['IV', 'IV_int', 'IV_ips', 'Chan'] else None
             if cond_key and cond_key in res:
                 conds = np.array(res[cond_key], dtype=float)
                 conds = conds[~np.isnan(conds)]

@@ -304,6 +304,61 @@ def iv_stacking_with_intercept(Y, R, ps_fitted_list, or_fitted_list):
     return mu_hat, cond_num, first_stage_F
 
 
+def iv_stacking_invps(Y, R, ps_fitted_list, or_fitted_list):
+    """
+    IV stacking with 1/π̂_k instruments (inverse propensity).
+
+    Among R==1: IV of Y on {m̂_1,...,m̂_K} with instruments {1/π̂_1,...,1/π̂_K}.
+    No intercept.
+
+    Moment condition: E_{R=1}[(1/e_k) · (Y − Σ φ_j m̂_j)] = 0
+    When e_k = e (correct PS): E[μ − Σφ_j m̂_j] = 0  (uniform measure).
+    This matches the prediction μ̂ = (1/n)ΣMφ, restoring PS-channel robustness.
+
+    Returns: (mu_hat, cond_num, first_stage_F)
+    """
+    n = len(Y)
+    K = len(ps_fitted_list)
+    complete = (R == 1)
+    m_c = int(complete.sum())
+
+    M_all = np.column_stack(or_fitted_list)                         # (n, K)
+    Z_all = np.column_stack([1.0 / _clip_ps(ps)
+                             for ps in ps_fitted_list])             # (n, K)
+
+    M_c = M_all[complete]
+    Z_c = Z_all[complete]
+    Y_c = Y[complete]
+
+    ZtM = Z_c.T @ M_c
+    ZtY = Z_c.T @ Y_c
+
+    cond_num = float(np.linalg.cond(ZtM))
+
+    try:
+        phi = np.linalg.solve(ZtM, ZtY)
+    except np.linalg.LinAlgError:
+        phi, _, _, _ = np.linalg.lstsq(ZtM, ZtY, rcond=None)
+
+    mu_hat = float(np.mean(M_all @ phi))
+
+    # First-stage F: regress each m_k on {1/π̂_1,...,1/π̂_K}
+    f_stats = []
+    for k in range(K):
+        m_k = M_c[:, k]
+        coef_k, _, _, _ = np.linalg.lstsq(Z_c, m_k, rcond=None)
+        resid = m_k - Z_c @ coef_k
+        ssr = np.sum(resid**2)
+        sst = np.sum((m_k - np.mean(m_k))**2)
+        if ssr > 0 and sst > 0:
+            r2 = 1 - ssr / sst
+            f_val = max(0, (r2 / max(K, 1)) / ((1 - r2) / max(m_c - K, 1)))
+            f_stats.append(f_val)
+    first_stage_F = float(np.mean(f_stats)) if f_stats else 0.0
+
+    return mu_hat, cond_num, first_stage_F
+
+
 def single_dr_estimator(Y, R, ps_fitted, or_fitted):
     """
     Standard Bang-Robins doubly robust estimator for E[Y].
