@@ -118,9 +118,18 @@ def _fit_cloglog(D, Xd):
     return _clip_ps(ps)
 
 
-def fit_or_model(Y, X, R, covariate_func):
+def fit_or_model(Y, X, is_complete, covariate_func):
     """
-    Fit outcome regression by OLS among R==1.
+    Fit outcome regression by OLS among is_complete==1.
+
+    Parameters
+    ----------
+    Y : (n,) outcome vector
+    X : (n,) covariate
+    is_complete : (n,) binary indicator (1 = use in fitting).
+        For E[Y]: R (missingness indicator).
+        For ATT: 1-D (control indicator).
+    covariate_func : callable
 
     Returns
     -------
@@ -132,7 +141,7 @@ def fit_or_model(Y, X, R, covariate_func):
         features = features.reshape(-1, 1)
     Xd_all = sm.add_constant(features)
 
-    complete = (R == 1)
+    complete = (is_complete == 1)
     Xd_c = Xd_all[complete]
     Y_c = Y[complete]
 
@@ -887,10 +896,10 @@ def run_att_robustness(R_reps, sample_sizes, seed=42):
                 mtype, cfunc, _ = PS_MODELS[pk]
                 ps_fitted[pk] = fit_ps_model(D, X, mtype, cfunc)
             or_fitted = {}
+            ctrl_indicator = (1 - D).astype(float)  # controls: D==0 → indicator==1
             for ok in or_keys:
                 cfunc, _ = OR_MODELS[ok]
-                or_fitted[ok] = fit_or_model(Y, X, (1-D).astype(float), cfunc)
-                # Note: OR fit among controls (D==0), i.e. R = 1-D for OR fitting
+                or_fitted[ok] = fit_or_model(Y, X, ctrl_indicator, cfunc)
 
             ps_list = [ps_fitted[pk] for pk in ps_keys]
             or_list = [or_fitted[ok] for ok in or_keys]
