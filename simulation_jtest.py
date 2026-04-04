@@ -296,9 +296,9 @@ def run_case1(R_reps, sample_sizes, seed=42):
     """
     Case 1: OR correct, PS wrong → ATT consistent, J does not reject.
 
-    OR: OR1_correct={X²,sin(2X)}, OR2={exp(X)}  — OR1 is correct
-    PS exact (K=2): PS2={sin(X)} wrong, PS3=probit{X} wrong
-    PS overid (K+L=4): PS2, PS3, PS4={exp(X)}, plus PS_extra=logit{X³} — all wrong
+    OR: OR1_correct={X²,sin(2X)} ← CORRECT, OR2={exp(X)} ← wrong
+    PS exact (K=2): PS_sin={sin(X)} wrong, PS_lin=probit{X} wrong
+    PS overid (K+L=4): PS_sin, PS_lin, PS_exp={exp(X)}, PS_cube={X³} — all wrong
     """
     or_funcs = [_or_correct, _or_exp]
     ps_exact_funcs = [_ps_sin, _ps_linear]  # both wrong → exact ID K=2
