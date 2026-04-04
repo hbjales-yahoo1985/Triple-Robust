@@ -22,9 +22,9 @@ DGPs vary across:
 DGP  | X distribution | PS form             | OR form               | τ    | σ
 -----|----------------|---------------------|-----------------------|------|----
 A    | U(-2, 2)       | Quadratic logit     | X² + sin(2X)          | 2.0  | 1.0
-B    | N(0, 1.5²)     | Linear logit        | exp(0.4X) + cos(X)    | 5.0  | 2.0
+B    | N(0, 1.5²)     | Linear logit        | sin(2X) + cos(3X)     | 5.0  | 2.0
 C    | U(-3, 3)       | U-shaped logit      | X + X³                | 0.5  | 0.5
-D    | U(0.5, 5)      | Inverted-U logit    | log(X) + sin(πX)      | 1.0  | 3.0
+D    | U(0.5, 5)      | Inverted-U logit    | log(X) + sin(πX)      | 1.0  | 1.5
 E    | U(-1, 5)       | Strong quad logit   | X² + cos(2X)          | 10.0 | 2.0
 F    | N(0, 2²)       | Trig logit          | X² + exp(-X²/2)       | 3.0  | 1.5
 
@@ -264,28 +264,29 @@ def make_dgp_configs():
         'ps_wrong_types': ['logit', 'probit', 'logit', 'logit'],
     })
 
-    # ── DGP B: Linear logit + exp/cos OR (high treatment, large effect) ─
+    # ── DGP B: Linear logit + trig OR (high treatment, large effect) ─────
     def dgp_B(rng, n):
         X = rng.normal(0, 1.5, n)
         X = np.clip(X, -4, 4)
         logit_e = 0.8 + 0.6*X
         e = _clip_ps(_invlogit(logit_e))
         D = rng.binomial(1, e, n).astype(float)
-        mu0 = 3.0 + 1.5*np.exp(0.4*X) + 2.0*np.cos(X)
+        # Rapid oscillations: polynomials {1,X,X²} cannot approximate these
+        mu0 = 5.0 + 2.0*np.sin(2*X) + 1.5*np.cos(3*X)
         Y0 = mu0 + rng.normal(0, 2.0, n)
         Y = D*(Y0 + 5.0) + (1-D)*Y0
         return Y, D, X, e, mu0
 
     configs.append({
-        'name': 'B: Linear logit + exp/cos OR (τ=5, σ=2)',
-        'desc': 'X~N(0,1.5²), logit(0.8+0.6X), μ₀=3+1.5exp(0.4X)+2cos(X), τ=5, σ=2',
+        'name': 'B: Linear logit + trig OR (τ=5, σ=2)',
+        'desc': 'X~N(0,1.5²), logit(0.8+0.6X), μ₀=5+2sin(2X)+1.5cos(3X), τ=5, σ=2',
         'dgp_func': dgp_B,
         'true_tau': 5.0,
-        'or_correct': lambda X: np.column_stack([np.exp(0.4*X), np.cos(X)]),
+        'or_correct': lambda X: np.column_stack([np.sin(2*X), np.cos(3*X)]),
         'or_wrong': [
-            # Avoid {X} and {X²} which combine to span{1,X,X²} ≈ truth
-            lambda X: np.sin(3*X).reshape(-1, 1),     # high-freq oscillation
-            lambda X: np.exp(-X**2).reshape(-1, 1),    # Gaussian bump
+            # Smooth polynomials: can't approximate rapid trig oscillations
+            lambda X: X.reshape(-1, 1),
+            lambda X: (X**2).reshape(-1, 1),
         ],
         'ps_correct': lambda X: X.reshape(-1, 1),
         'ps_correct_type': 'logit',
