@@ -302,6 +302,9 @@ def iv_stacking_with_intercept(Y, R, ps_fitted_list, or_fitted_list):
     first_stage_F = float(np.mean(f_stats)) if f_stats else 0.0
 
     return mu_hat, cond_num, first_stage_F
+
+
+def single_dr_estimator(Y, R, ps_fitted, or_fitted):
     """
     Standard Bang-Robins doubly robust estimator for E[Y].
 
