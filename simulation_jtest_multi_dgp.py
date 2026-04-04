@@ -263,10 +263,11 @@ def make_dgp_configs():
         ],
         'ps_correct': lambda X: np.column_stack([X, X**2]),
         'ps_correct_type': 'logit',
-        # Wrong PS use polynomial/trig/exp matching OR function class
-        # ps_wrong[0] uses exp(X) (not X) to avoid near-collinearity with ps_correct
+        # Wrong PS use polynomial/trig/exp matching OR function class.
+        # ps_wrong[0] is used with ps_correct in Case 4 (exact-id), so must
+        # produce odds distinct from ps_correct to avoid a singular IV system.
         'ps_wrong': [
-            lambda X: np.exp(X).reshape(-1, 1),
+            lambda X: np.exp(X).reshape(-1, 1),      # distinct from {X,X²}
             lambda X: np.sin(X).reshape(-1, 1),
             lambda X: X.reshape(-1, 1),
             lambda X: (X**2).reshape(-1, 1),
@@ -401,10 +402,11 @@ def make_dgp_configs():
         ],
         'ps_correct': lambda X: np.column_stack([X, X**2]),
         'ps_correct_type': 'logit',
-        # Wrong PS use polynomial/trig matching OR function class
-        # ps_wrong[0] uses sin(X) (not X) to avoid near-collinearity with ps_correct
+        # Wrong PS use polynomial/trig matching OR function class.
+        # ps_wrong[0] is used with ps_correct in Case 4 (exact-id), so must
+        # produce odds distinct from ps_correct to avoid a singular IV system.
         'ps_wrong': [
-            lambda X: np.sin(X).reshape(-1, 1),
+            lambda X: np.sin(X).reshape(-1, 1),       # distinct from {X,X²}
             lambda X: np.cos(X).reshape(-1, 1),
             lambda X: X.reshape(-1, 1),
             lambda X: (X**2).reshape(-1, 1),
@@ -436,10 +438,11 @@ def make_dgp_configs():
         ],
         'ps_correct': lambda X: np.column_stack([X, np.sin(2*X)]),
         'ps_correct_type': 'logit',
-        # Wrong PS use polynomial/trig matching OR function class
-        # ps_wrong[0] uses X² (not X) to avoid near-collinearity with ps_correct
+        # Wrong PS use polynomial/trig matching OR function class.
+        # ps_wrong[0] is used with ps_correct in Case 4 (exact-id), so must
+        # produce odds distinct from ps_correct to avoid a singular IV system.
         'ps_wrong': [
-            lambda X: (X**2).reshape(-1, 1),
+            lambda X: (X**2).reshape(-1, 1),           # distinct from {X,sin(2X)}
             lambda X: np.sin(X).reshape(-1, 1),
             lambda X: np.cos(X).reshape(-1, 1),
             lambda X: X.reshape(-1, 1),
