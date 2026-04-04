@@ -130,13 +130,18 @@ def fit_or_model(Y, D, X, covariate_func):
 # ═══════════════════════════════════════════════════════════════════════════
 #  Covariate functions for working models
 # ═══════════════════════════════════════════════════════════════════════════
+# Design principle: wrong PS models use the SAME class of basis function
+# transforms as the OR models (polynomial, trig, exp) to ensure instrument
+# relevance — Cov(odds, m̂) is large when both live in similar function
+# spaces.  Accidental spanning is acceptable; the J-test flags genuine
+# misspecification.
 
 # OR models
 def _or_linear(X):       return X.reshape(-1, 1)                         # {X}
 def _or_exp(X):          return np.exp(X).reshape(-1, 1)                 # {exp(X)}
 def _or_correct(X):      return np.column_stack([X**2, np.sin(2*X)])     # {X²,sin(2X)} ← CORRECT
 
-# PS models
+# PS models — use matching function class transforms for instrument relevance
 def _ps_quad(X):         return np.column_stack([X, X**2])               # {X,X²} ← CORRECT
 def _ps_sin(X):          return np.sin(X).reshape(-1, 1)                 # {sin(X)}
 def _ps_linear(X):       return X.reshape(-1, 1)                         # {X}
