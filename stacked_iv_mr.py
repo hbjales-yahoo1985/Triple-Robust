@@ -248,7 +248,60 @@ def iv_stacking_estimator(Y, R, ps_fitted_list, or_fitted_list):
     return mu_hat, cond_num, first_stage_F
 
 
-def single_dr_estimator(Y, R, ps_fitted, or_fitted):
+def iv_stacking_with_intercept(Y, R, ps_fitted_list, or_fitted_list):
+    """
+    IV stacking WITH intercept for E[Y].
+
+    Regressors: {1, m̂_1,...,m̂_K}  (K+1 columns)
+    Instruments: {1, o_1,...,o_K}   (K+1 columns)
+
+    The constant-on-constant moment pins E[Y|R=1] = φ₀ + Σ φ_k E[m̂_k|R=1],
+    and the odds moments handle reweighting → should restore PS-channel.
+
+    Returns: (mu_hat, cond_num, first_stage_F)
+    """
+    n = len(Y)
+    K = len(ps_fitted_list)
+    complete = (R == 1)
+    m_c = int(complete.sum())
+
+    M_all = np.column_stack([np.ones(n)] + list(or_fitted_list))      # (n, K+1)
+    O_all = np.column_stack([np.ones(n)] +
+                            [_clip_ps(ps)/(1.0 - _clip_ps(ps))
+                             for ps in ps_fitted_list])               # (n, K+1)
+
+    M_c = M_all[complete]
+    O_c = O_all[complete]
+    Y_c = Y[complete]
+
+    OtM = O_c.T @ M_c
+    OtY = O_c.T @ Y_c
+
+    cond_num = float(np.linalg.cond(OtM))
+
+    try:
+        phi = np.linalg.solve(OtM, OtY)
+    except np.linalg.LinAlgError:
+        phi, _, _, _ = np.linalg.lstsq(OtM, OtY, rcond=None)
+
+    mu_hat = float(np.mean(M_all @ phi))
+
+    # First-stage F
+    Kp = K + 1
+    f_stats = []
+    for k in range(Kp):
+        m_k = M_c[:, k]
+        coef_k, _, _, _ = np.linalg.lstsq(O_c, m_k, rcond=None)
+        resid = m_k - O_c @ coef_k
+        ssr = np.sum(resid**2)
+        sst = np.sum((m_k - np.mean(m_k))**2)
+        if ssr > 0 and sst > 0:
+            r2 = 1 - ssr / sst
+            f_val = max(0, (r2 / max(Kp, 1)) / ((1 - r2) / max(m_c - Kp, 1)))
+            f_stats.append(f_val)
+    first_stage_F = float(np.mean(f_stats)) if f_stats else 0.0
+
+    return mu_hat, cond_num, first_stage_F
     """
     Standard Bang-Robins doubly robust estimator for E[Y].
 

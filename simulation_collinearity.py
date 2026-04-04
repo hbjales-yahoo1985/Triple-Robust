@@ -8,6 +8,13 @@ bias. Chan converges because its {1, 1/π̂} terms provide PS-channel correction
 IV's consistency requires μ(X) ∈ span(m̂₁,...,m̂_K) under the weighted inner
 product w(X) = e²(X)/(1-e(X)), which is NOT guaranteed by correct PS alone.
 
+**INTERCEPT TEST**: Adding a constant column to both instruments and regressors
+(IV_int) does NOT restore the PS-channel. At R=100, n=5000: IV bias=+0.048,
+IV_int bias=-0.080, Chan bias=+0.004. The constant-on-constant moment only
+pins E[Y|R=1], not E[Y]. PS-channel correction requires 1/π̂ as a REGRESSOR
+(as Chan does), because only regressors enter the prediction μ̂ = (1/n)ΣM·φ.
+Instruments affect coefficient estimation but not the prediction formula.
+
 Two questions:
 
 1. **No accidental spanning**: Craft a DGP where the OR/PS working model
@@ -133,6 +140,37 @@ def iv_stacking_estimator(Y, R, ps_fitted_list, or_fitted_list):
     complete = (R == 1)
     M_all = np.column_stack(or_fitted_list)
     O_all = np.column_stack([_clip_ps(ps)/(1.0 - _clip_ps(ps))
+                             for ps in ps_fitted_list])
+    M_c = M_all[complete]
+    O_c = O_all[complete]
+    Y_c = Y[complete]
+    OtM = O_c.T @ M_c
+    OtY = O_c.T @ Y_c
+    cond_num = float(np.linalg.cond(OtM))
+    try:
+        phi = np.linalg.solve(OtM, OtY)
+    except np.linalg.LinAlgError:
+        phi, _, _, _ = np.linalg.lstsq(OtM, OtY, rcond=None)
+    return float(np.mean(M_all @ phi)), cond_num
+
+
+def iv_stacking_with_intercept(Y, R, ps_fitted_list, or_fitted_list):
+    """
+    IV stacking WITH intercept — adds constant to both regressors and instruments.
+
+    Regressors: {1, m̂_1,...,m̂_K}  (K+1 columns)
+    Instruments: {1, o_1,...,o_K}   (K+1 columns)
+
+    The constant-on-constant moment pins E[Y|R=1] = φ₀ + Σ φ_k E[m̂_k|R=1],
+    and the odds moments handle reweighting → should restore PS-channel.
+
+    Returns (mu_hat, cond_num).
+    """
+    n = len(Y)
+    complete = (R == 1)
+    M_all = np.column_stack([np.ones(n)] + list(or_fitted_list))
+    O_all = np.column_stack([np.ones(n)] +
+                            [_clip_ps(ps)/(1.0 - _clip_ps(ps))
                              for ps in ps_fitted_list])
     M_c = M_all[complete]
     O_c = O_all[complete]
@@ -348,8 +386,8 @@ def run_scenario_generic(dgp_func, ps_cov_funcs, or_cov_funcs,
     assert K == len(or_cov_funcs), "K must match for IV stacking"
 
     results = {
-        'IV': [], 'Chan': [], 'Oracle': [],
-        'IV_cond': [], 'Chan_cond': [],
+        'IV': [], 'IV_int': [], 'Chan': [], 'Oracle': [],
+        'IV_cond': [], 'IV_int_cond': [], 'Chan_cond': [],
         'DR_best': [], 'DR_worst': [],
         'span_r2': [], 'regressor_corr_max': [],
     }
@@ -396,6 +434,16 @@ def run_scenario_generic(dgp_func, ps_cov_funcs, or_cov_funcs,
         except Exception:
             results['IV'].append(np.nan)
             results['IV_cond'].append(np.nan)
+
+        # IV stacking with intercept
+        try:
+            mu_iv_int, cond_iv_int = iv_stacking_with_intercept(
+                Y_safe, R, ps_fitted, or_fitted)
+            results['IV_int'].append(mu_iv_int)
+            results['IV_int_cond'].append(cond_iv_int)
+        except Exception:
+            results['IV_int'].append(np.nan)
+            results['IV_int_cond'].append(np.nan)
 
         # Chan OLS
         try:
@@ -473,9 +521,9 @@ def run_S1(R_reps, sample_sizes, seed=42):
     for n_val in sample_sizes:
         res = run_scenario_generic(dgp_no_spanning, ps_funcs, or_funcs,
                                    n_val, R_reps, seed)
-        for est in ['IV', 'Chan', 'DR_best', 'DR_worst']:
+        for est in ['IV', 'IV_int', 'Chan', 'DR_best', 'DR_worst']:
             mn, bias, sd, rmse = _stats(res[est], true_EY)
-            cond_key = f'{est}_cond' if est in ['IV', 'Chan'] else None
+            cond_key = f'{est}_cond' if est in ['IV', 'IV_int', 'Chan'] else None
             if cond_key and cond_key in res:
                 conds = np.array(res[cond_key], dtype=float)
                 conds = conds[~np.isnan(conds)]
@@ -523,9 +571,9 @@ def run_S2(R_reps, sample_sizes, seed=42):
     for n_val in sample_sizes:
         res = run_scenario_generic(dgp_diverse, ps_funcs, or_funcs,
                                    n_val, R_reps, seed)
-        for est in ['IV', 'Chan', 'DR_best', 'DR_worst']:
+        for est in ['IV', 'IV_int', 'Chan', 'DR_best', 'DR_worst']:
             mn, bias, sd, rmse = _stats(res[est], true_EY)
-            cond_key = f'{est}_cond' if est in ['IV', 'Chan'] else None
+            cond_key = f'{est}_cond' if est in ['IV', 'IV_int', 'Chan'] else None
             if cond_key and cond_key in res:
                 conds = np.array(res[cond_key], dtype=float)
                 conds = conds[~np.isnan(conds)]
@@ -594,9 +642,9 @@ def run_S3(R_reps, sample_sizes, seed=42):
             print(f"  Max off-diag |corr| in Chan regressors: "
                   f"{res['regressor_corr_max'][0]:.4f}")
 
-        for est in ['IV', 'Chan', 'DR_best', 'DR_worst']:
+        for est in ['IV', 'IV_int', 'Chan', 'DR_best', 'DR_worst']:
             mn, bias, sd, rmse = _stats(res[est], true_EY)
-            cond_key = f'{est}_cond' if est in ['IV', 'Chan'] else None
+            cond_key = f'{est}_cond' if est in ['IV', 'IV_int', 'Chan'] else None
             if cond_key and cond_key in res:
                 conds = np.array(res[cond_key], dtype=float)
                 conds = conds[~np.isnan(conds)]
@@ -720,7 +768,7 @@ def run_S4(R_reps, n=1000, seed=42):
         or_fitted_rep = [fit_or_model(Y_safe, X, R, f) for f in or_funcs]
         or_corr = _or_fitted_correlation(R, or_fitted_rep)
 
-        for est in ['IV', 'Chan']:
+        for est in ['IV', 'IV_int', 'Chan']:
             mn, bias, sd, rmse = _stats(res[est], true_EY)
             conds = np.array(res[f'{est}_cond'], dtype=float)
             conds = conds[~np.isnan(conds)]
@@ -804,9 +852,9 @@ def run_S5(R_reps, sample_sizes, seed=42):
             print(f"  Max off-diag |corr| in Chan regressors: "
                   f"{res['regressor_corr_max'][0]:.4f}")
 
-        for est in ['IV', 'Chan', 'DR_best', 'DR_worst']:
+        for est in ['IV', 'IV_int', 'Chan', 'DR_best', 'DR_worst']:
             mn, bias, sd, rmse = _stats(res[est], true_EY)
-            cond_key = f'{est}_cond' if est in ['IV', 'Chan'] else None
+            cond_key = f'{est}_cond' if est in ['IV', 'IV_int', 'Chan'] else None
             if cond_key and cond_key in res:
                 conds = np.array(res[cond_key], dtype=float)
                 conds = conds[~np.isnan(conds)]
@@ -929,13 +977,18 @@ def main():
     print("  1. IV stacking has OR-channel robustness only (not PS-channel).")
     print("     When correct PS is present but OR models don't span μ(X),")
     print("     IV has persistent bias. Chan converges (has PS channel).")
-    print("  2. Chan's enormous condition numbers (10¹⁰+) are harmless when")
+    print("  2. Adding a constant as instrument + regressor (IV_int) does NOT")
+    print("     fix the PS-channel. IV_int bias is similar or worse than IV.")
+    print("     The constant-on-constant moment pins E[Y|R=1], not E[Y].")
+    print("     PS-channel correction requires 1/π̂ in the REGRESSORS")
+    print("     (as Chan does), not just an intercept.")
+    print("  3. Chan's enormous condition numbers (10¹⁰+) are harmless when")
     print("     the truth IS in the model span — lstsq handles it fine.")
-    print("  3. High cond + misspecification (S5) is the problematic case.")
+    print("  4. High cond + misspecification (S5) is the problematic case.")
     print("     Collinearity prevents Chan from using the 1/π̂ terms")
     print("     effectively when the OR fitted values are near-identical")
     print("     but wrong.")
-    print("  4. DGP complexity gradient: simpler DGP → higher OR correlation")
+    print("  5. DGP complexity gradient: simpler DGP → higher OR correlation")
     print("     → higher condition number, but LOWER RMSE when models are")
     print("     correct. The condition number only hurts under misspec.")
     print("="*70)
