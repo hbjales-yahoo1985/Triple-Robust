@@ -2,6 +2,12 @@
 Simulation: Chan vs IV Stacking Under Model Similarity & Accidental Spanning
 =============================================================================
 
+**KEY FINDING**: IV stacking has OR-channel robustness only (not PS-channel).
+When the correct PS is present but no OR model spans μ(X), IV has persistent
+bias. Chan converges because its {1, 1/π̂} terms provide PS-channel correction.
+IV's consistency requires μ(X) ∈ span(m̂₁,...,m̂_K) under the weighted inner
+product w(X) = e²(X)/(1-e(X)), which is NOT guaranteed by correct PS alone.
+
 Two questions:
 
 1. **No accidental spanning**: Craft a DGP where the OR/PS working model
